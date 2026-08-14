@@ -43,9 +43,6 @@ evenings.
 > it.
 >
 > 👉 **[sideris.art/journal](https://sideris.art/journal/)**
->
-> *(The Journal and the newsletter are in Italian. The code and this
-> documentation are in English.)*
 
 ---
 
