@@ -2,98 +2,107 @@
   <img src="logo.png" alt="Sideris Art" width="180">
 </p>
 
-<h1 align="center">Agente ASIAIR per osservatorio remoto</h1>
+<h1 align="center">ASIAIR agent for a remote observatory</h1>
 
 <p align="center">
-  <em>Automazione completa di una notte di ripresa: avvio del piano, sorveglianza,
-  pausa meteo, flat e dark all'alba, spegnimento, diario e statistiche.</em>
+  <em>A full night of imaging, unattended: plan start, monitoring, weather pause,
+  flats and darks at dawn, safe shutdown, session log and statistics.</em>
 </p>
 
 <p align="center">
-  <a href="#licenza"><img src="https://img.shields.io/badge/licenza-MIT-f5e6b8" alt="MIT"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT-f5e6b8" alt="MIT"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-071535" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/ASIAIR-firmware%20v1-0a1c3e" alt="ASIAIR v1">
 </p>
 
 ---
 
-## Cos'è
+<p align="center">
+  <strong>English</strong> · <a href="README.it.md">Italiano</a>
+</p>
 
-Questo è il software che manda avanti da solo le mie notti su un **osservatorio
-remoto**, a migliaia di chilometri da casa. Gira su un piccolo server Linux,
-parla direttamente con l'**ASIAIR** sul suo protocollo JSON-RPC (niente app,
-niente VNC, niente click) e si occupa di tutto quello che di solito faresti a
-mano — solo che lo fa alle tre di notte mentre dormi, e all'alba ti manda su
-Telegram il resoconto con il link alle statistiche.
+---
 
-Non è un prodotto: è un progetto personale, cresciuto notte dopo notte, con i
-suoi guasti veri e le contromisure che ne sono nate. Lo pubblico perché le
-trappole che ho trovato — e sono tante — possano risparmiare a qualcun altro
-le stesse serate perse.
+## What this is
 
-> **Se lo trovi utile**, la cosa che mi fa più piacere è che tu ti iscriva alla
-> newsletter: è lì che racconto come evolve il progetto, cosa si rompe, cosa
-> imparo notte dopo notte — e le foto che ne escono.
+This is the software that runs my nights on a **remote observatory**, a few
+thousand kilometres from home. It lives on a small Linux server, talks to the
+**ASIAIR** directly over its JSON-RPC protocol — no app, no VNC, no tapping —
+and takes care of everything you would normally do by hand, except it does it at
+three in the morning while you sleep, and at dawn it sends you the night's
+summary on Telegram with a link to the statistics.
+
+This is not a product. It's a personal project that grew night after night, with
+real failures behind every safeguard in it. I'm publishing it because the traps I
+walked into — and there were many — might save someone else the same wasted
+evenings.
+
+> **If you find it useful**, the thing I'd appreciate most is that you subscribe
+> to the newsletter: that's where I write about how the project evolves, what
+> breaks, what I learn night after night — and the photographs that come out of
+> it.
 >
 > 👉 **[sideris.art/journal](https://sideris.art/journal/)**
+>
+> *(The Journal and the newsletter are in Italian. The code and this
+> documentation are in English.)*
 
 ---
 
-## Cosa sa fare
+## What it does
 
-**Durante la notte**
+**Through the night**
 
-- Verifica che i device siano collegati e che la **montatura sia davvero puntata
-  alle coordinate giuste** prima di far partire qualsiasi cosa (gate di posizione).
-- Legge lo **stato del tetto** da un'API ASCOM Alpaca e opera solo dentro la
-  **notte nautica**, calcolata dalle coordinate dell'osservatorio.
-- Accende l'anti-condensa della camera e la fascia anticondensa, apre il flat
-  panel motorizzato, **avvia il piano**.
-- Ogni 5 minuti: controlla che la ripresa proceda, **sincronizza i FITS** sul NAS
-  in modo incrementale, aggiorna il diario.
-- **Chiusura meteo = pausa, non fine**: ferma il piano, parcheggia, chiude il
-  pannello, ma tiene il cooler acceso e non azzera niente. Quando il tetto
-  riapre, **il piano riparte da solo dal punto in cui si era interrotto**.
+- Checks that all devices are connected and that the **mount is actually pointing
+  at the right coordinates** before starting anything (position gate).
+- Reads **roof state** from an ASCOM Alpaca API and only operates inside
+  **nautical night**, computed from the observatory's coordinates.
+- Turns on the camera's anti-dew heater and the dew strap, opens the motorised
+  flat panel, **starts the plan**.
+- Every 5 minutes: verifies imaging is progressing, **syncs FITS** to the NAS
+  incrementally, updates the session log.
+- **Weather closure is a pause, not an ending**: it stops the plan, parks, closes
+  the panel — but keeps the cooler running and resets nothing. When the roof
+  reopens, **the plan resumes by itself from where it left off**.
 
-**All'alba**
+**At dawn**
 
-- Ferma il piano, parcheggia, resetta il piano per la notte dopo.
-- Fascia anticondensa al massimo e **30 minuti di asciugatura** prima di
-  qualsiasi flat (la condensa sul pannello rovina i flat, e non te ne accorgi).
-- **Flat automatici per (filtro, gain) effettivamente usati quella notte**:
-  legge dal diario quali filtri hai ripreso e con che gain, raggruppa, imposta
-  la luminosità del pannello per gruppo e lancia un autorun per ciascuno con
-  tempo di posa AUTO.
-- **Dark flat** subito dopo, a pannello spento, con la posa esatta calcolata dai
-  flat appena fatti.
-- Sync finale, `pi_shutdown`, attesa che il box sia **davvero** morto, e solo
-  allora stacca la corrente dalle prese smart.
+- Stops the plan, parks the mount, resets the plan for the next night.
+- Dew strap to full and **30 minutes of drying** before any flat, because
+  condensation on the panel ruins flats and you won't notice until it's too late.
+- **Flats per (filter, gain) actually used that night**: it reads from the
+  session log which filters you shot and at what gain, groups them, sets panel
+  brightness per group and runs one autorun for each, with AUTO exposure.
+- **Dark flats** immediately after, panel off, at exactly the exposure computed
+  from the flats it just took.
+- Final sync, `pi_shutdown`, waits until the box is **actually** dead, and only
+  then cuts power at the smart plugs.
 
-**Sempre**
+**Always**
 
-- **Bot Telegram** con menu a bottoni: stato, avvio, avvio piano, sync manuale,
-  flat/dark a comando, spegnimento — tutte le operazioni pericolose con conferma.
-- **Telemetria MQTT** verso Home Assistant: ~50 entità fra guida (RMS e picchi
-  su finestra mobile), camera, fuoco, montatura, storage, temperatura CPU del
-  box e assorbimento per singola presa.
-- **Diario automatico**: legge gli header FITS, li mette in SQLite, aggiorna un
-  Google Sheet con gli aggregati, scrive il dettaglio per notte in CSV.
-- **Dashboard HTML** autonoma con le statistiche: ore per soggetto e filtro,
-  resa sul buio disponibile, RMS di guida e HFR per notte, istogrammi.
+- **Telegram bot** with a button menu: status, power-on, start plan, manual sync,
+  on-demand flats/darks, shutdown — every dangerous action behind a confirmation.
+- **MQTT telemetry** to Home Assistant: ~50 entities covering guiding (RMS and
+  peaks over a moving window), camera, focus, mount, storage, the box's CPU
+  temperature and per-outlet power draw.
+- **Automatic session log**: reads FITS headers into SQLite, updates a Google
+  Sheet with aggregates, writes per-night detail to CSV.
+- **Self-contained HTML dashboard**: hours per target and filter, yield against
+  available darkness, guiding RMS and HFR per night, histograms.
 
 ---
 
-## Com'è fatto
+## How it's built
 
 ```
                  ┌─────────────┐   Alpaca/HTTPS    ┌──────────────┐
-                 │  API tetto  │◄──────────────────┤              │
+                 │  roof API   │◄──────────────────┤              │
                  └─────────────┘                   │              │
-                 ┌─────────────┐   cloud TP-Link   │   AGENTE     │
-                 │ prese Kasa  │◄──────────────────┤  (ogni 5')   │
+                 ┌─────────────┐   TP-Link cloud   │    AGENT     │
+                 │ smart plugs │◄──────────────────┤  (every 5')  │
                  └─────────────┘                   │              │
-                 ┌─────────────┐   JSON-RPC 4700   │  macchina    │
-                 │   ASIAIR    │◄──────────────────┤  a stati     │
+                 ┌─────────────┐   JSON-RPC 4700   │    state     │
+                 │   ASIAIR    │◄──────────────────┤   machine    │
                  │             │   JSON-RPC 4400   │              │
                  └──────┬──────┘◄──────────────────┤              │
                         │ SMB                      └──┬────┬──────┘
@@ -104,54 +113,58 @@ le stesse serate perse.
                                                       │
                                           ┌───────────▼────────────┐
                                           │ Google Sheet · CSV ·   │
-                                          │ dashboard HTML · MQTT  │
+                                          │ HTML dashboard · MQTT  │
                                           └────────────────────────┘
 ```
 
-| File | Ruolo |
+| File | Role |
 |---|---|
-| `sfro_agent.py` | L'agente. Timer systemd **oneshot ogni 5 minuti**: nessun demone che può morire in silenzio, ogni ciclo riparte da zero leggendo lo stato da disco. Orchestrazione della notte, teardown, flusso flat/dark, sync. |
-| `sfro_mqtt.py` | Servizio persistente: telemetria verso MQTT/Home Assistant, ascolto degli eventi push dell'ASIAIR, sink JSONL di guida e autofocus. |
-| `sfro_telegram.py` | Servizio persistente: bot con menu a bottoni e conferme. |
-| `sfro_sessionlog.py` | Diario: FITS → SQLite → Google Sheet + CSV. |
-| `sfro_report.py` | Dashboard HTML statistiche (file unico, niente CDN). |
-| `asiair_client.py` | Trasporto JSON-RPC verso l'ASIAIR (porte 4700 e 4400). |
+| `sfro_agent.py` | The agent. A systemd **oneshot timer every 5 minutes**: no daemon that can die quietly, every cycle starts fresh by reading state from disk. Night orchestration, teardown, flat/dark flow, sync. |
+| `sfro_mqtt.py` | Long-running service: MQTT/Home Assistant telemetry, listens to the ASIAIR's push events, writes guiding and autofocus JSONL sinks. |
+| `sfro_telegram.py` | Long-running service: Telegram bot with button menu and confirmations. |
+| `sfro_sessionlog.py` | Session log: FITS → SQLite → Google Sheet + CSV. |
+| `sfro_report.py` | HTML statistics dashboard (single file, no CDN). |
+| `asiair_client.py` | JSON-RPC transport to the ASIAIR (ports 4700 and 4400). |
 
-**Perché oneshot e non un demone**: un processo che gira per giorni accumula
-socket zombie, connessioni CIFS in D-state e stati incoerenti. Un ciclo che
-nasce, legge lo stato da un JSON, fa una cosa sola e muore è molto più difficile
-da rompere — e se si impianta, il timer successivo riparte comunque.
+**Why oneshot instead of a daemon**: a process that runs for days accumulates
+zombie sockets, CIFS mounts stuck in D-state and inconsistent state. A cycle that
+is born, reads its state from a JSON file, does one thing and dies is far harder
+to break — and if it does hang, the next timer fires anyway.
+
+> **A note on names**: files and services are prefixed `sfro_` / `sfro-`, after
+> the remote observatory this was written for. It's just a name — nothing in the
+> code is tied to any particular site.
 
 ---
 
-## Requisiti
+## Requirements
 
-- **ASIAIR** con **firmware v1** (l'app 2.x). Vedi la nota sulla v3 più sotto.
-- Un **server Linux** sempre acceso, raggiungibile in rete con l'ASIAIR
-  (direttamente o via VPN). Basta un mini PC o un Raspberry.
-- Python **3.10+** e le tre dipendenze in `requirements.txt`
+- An **ASIAIR** on **firmware v1** (the 2.x app). See the note on v3 below.
+- A **Linux server** that stays on, able to reach the ASIAIR over the network
+  (directly or through a VPN). A mini PC or a Raspberry Pi is plenty.
+- Python **3.10+** and the three dependencies in `requirements.txt`
   (`requests`, `astral`, `PyYAML`).
-- **Opzionali**: prese smart TP-Link Kasa (accensione/spegnimento del rig),
-  un broker MQTT e Home Assistant (telemetria), un bot Telegram (notifiche e
-  comandi), un NAS o un disco per i FITS, un service account Google (diario su
-  Sheets), Apache o qualsiasi web server (dashboard).
-- Un **tetto o cupola con API ASCOM Alpaca** se vuoi la logica di apertura
-  automatica. Senza, l'agente funziona lo stesso: consideri il tetto sempre
-  aperto e ti tieni l'automazione del resto.
+- **Optional**: TP-Link Kasa smart plugs (powering the rig on and off), an MQTT
+  broker and Home Assistant (telemetry), a Telegram bot (notifications and
+  commands), a NAS or any disk for the FITS, a Google service account (Sheets
+  log), Apache or any web server (dashboard).
+- A **roof or dome exposing an ASCOM Alpaca API**, if you want the roof logic.
+  Without one the agent still works: treat the roof as always open and keep the
+  rest of the automation.
 
-### ⚠️ Firmware ASIAIR v3
+### ⚠️ ASIAIR firmware v3
 
-Dal firmware v3 il canale 4700 richiede un **handshake RSA di autenticazione**
-con una chiave che sta dentro l'app. Questo codice è validato su **v1** e su v3
-si fermerebbe al primo comando. In `tools/asiair-tool/` trovi gli script (MIT,
-di [cpius/asiair-tool](https://github.com/cpius/asiair-tool)) per estrarre la
-chiave dall'APK e provare l'handshake; il portarlo dentro `asiair_client.py` è
-un lavoro che non ho ancora fatto. **Se aggiorni l'app, non torni indietro**:
-disattiva l'aggiornamento automatico finché non sei pronto.
+From firmware v3 onwards, port 4700 requires an **RSA authentication handshake**
+using a key embedded in the app. This code is validated on **v1** and would stop
+at the first command on v3. In `tools/asiair-tool/` you'll find the scripts (MIT,
+from [cpius/asiair-tool](https://github.com/cpius/asiair-tool)) to extract that
+key from the APK and test the handshake; porting it into `asiair_client.py` is
+work I haven't done yet. **App updates cannot be undone**: turn off automatic
+updates until you're ready.
 
 ---
 
-## Installazione rapida
+## Quick start
 
 ```bash
 git clone https://github.com/martellucci/siderisart-agent-asiair.git
@@ -160,121 +173,121 @@ pip install -r requirements.txt
 cp config.example.yaml config.yaml
 ```
 
-Poi apri `config.yaml` e compila tutti i punti marcati con `<<<`
-(coordinate, IP dell'ASIAIR, endpoint del tetto, prese, broker). Compila i file
-`.txt` delle credenziali seguendo **[docs/CREDENZIALI.md](docs/CREDENZIALI.md)**
-e proteggili:
+Then open `config.yaml` and fill in everything marked `<<<` (coordinates, ASIAIR
+IP, roof endpoint, plugs, broker). Fill in the credential `.txt` files following
+**[docs/CREDENTIALS.md](docs/CREDENTIALS.md)** and lock them down:
 
 ```bash
 chmod 600 *.txt credentials_asiair
 ```
 
-Prova a vuoto, senza toccare niente:
+Try a dry run, which touches nothing:
 
 ```bash
 python3 sfro_agent.py --config config.yaml --once --dry-run
 ```
 
-Quando sei convinto, installa i servizi come da
-**[docs/INSTALLAZIONE.md](docs/INSTALLAZIONE.md)**.
+When you're satisfied, install the services as described in
+**[docs/INSTALL.md](docs/INSTALL.md)**.
 
-> ### ⚠️ Non committare le tue credenziali
-> I file `kasa.txt`, `telegram.txt`, `mqtt.txt`, `asiair.txt` sono nel repo
-> **vuoti**, come modelli. Appena li compili, git li vede modificati: dì a git
-> di ignorarne le modifiche, una volta sola.
+> ### ⚠️ Don't commit your credentials
+> `kasa.txt`, `telegram.txt`, `mqtt.txt` and `asiair.txt` ship **empty**, as
+> templates. The moment you fill them in, git sees them as modified. Tell git to
+> ignore those changes, once:
 > ```bash
 > git update-index --skip-worktree kasa.txt telegram.txt mqtt.txt asiair.txt
 > ```
-> Il `.gitignore` protegge già `config.yaml`, `credentials_asiair`,
-> `*.pem` e `gdrive_sa.json`.
+> `.gitignore` already covers `config.yaml`, `credentials_asiair`, `*.pem` and
+> `gdrive_sa.json`.
 
 ---
 
-## Documentazione
+## Documentation
 
-| Documento | Contenuto |
+| Document | Contents |
 |---|---|
-| **[docs/PROTOCOLLO_ASIAIR.md](docs/PROTOCOLLO_ASIAIR.md)** | **Il pezzo forte.** Il protocollo dell'ASIAIR come l'ho ricostruito comando per comando: canali, metodi, parametri, forma delle risposte, e soprattutto le **trappole** verificate dal vivo. |
-| **[docs/CREDENZIALI.md](docs/CREDENZIALI.md)** | Come procurarsi e comporre ogni credenziale: bot Telegram, account Kasa e id della presa, SMB dell'ASIAIR, service account Google, chiave RSA per la v3. |
-| **[docs/RETE.md](docs/RETE.md)** | Raggiungere un ASIAIR remoto: VPN sul router (non sul server), VLAN dedicata, regole firewall minime, e come diagnosticare "la VPN è su?" senza falsi negativi. |
-| **[docs/INSTALLAZIONE.md](docs/INSTALLAZIONE.md)** | Installazione dei servizi systemd, mount CIFS, dashboard, verifica. |
-| `tools/asiair-tool/RPC_METHODS.md` | Elenco dei metodi RPC estratti dall'app (materiale di terze parti, MIT). |
+| **[docs/ASIAIR_PROTOCOL.md](docs/ASIAIR_PROTOCOL.md)** | **The good part.** The ASIAIR protocol as I reconstructed it, command by command: channels, methods, parameters, response shapes, and above all the **traps**, each verified on live hardware. |
+| **[docs/CREDENTIALS.md](docs/CREDENTIALS.md)** | How to obtain and assemble every credential: Telegram bot, Kasa account and plug id, ASIAIR SMB, Google service account, RSA key for v3. |
+| **[docs/NETWORK.md](docs/NETWORK.md)** | Reaching a remote ASIAIR: VPN on the router (not on the server), a dedicated VLAN, minimal firewall rules, and how to answer "is the VPN up?" without false negatives. |
+| **[docs/INSTALL.md](docs/INSTALL.md)** | systemd services, CIFS mounts, dashboard, verification. |
+| `tools/asiair-tool/RPC_METHODS.md` | RPC methods extracted from the app (third-party material, MIT). |
 
 ---
 
-## Le trappole che mi sono costate una notte
+## The traps that each cost me a night
 
-Questo è il valore vero del progetto. Ogni riga qui sotto è una serata persa.
+This is where the real value of the project is. Every line below is a lost
+evening.
 
-| Trappola | Cosa succede | Rimedio nel codice |
+| Trap | What happens | How it's handled |
 |---|---|---|
-| **`value: 0` sul flat panel** | Il firmware interpreta lo 0 come `state:false` e il pannello **si APRE** invece di spegnersi. | "Chiuso e spento" = `value:5, state:true`. Mai zero su un'uscita PWM. |
-| **`is_plan_started` mente** | Resta `true` anche dopo che il piano è stato fermato: non significa "sta riprendendo adesso". | Per dire "sta riprendendo" servono `plan_started` **e** `capturing`. |
-| **Un piano interrotto non riparte** | `start_exposure` su un piano a metà non fa nulla di utile: va **resettato** prima. | `reset_plan()` con verifica su `get_plan` (lapsed 0, left == total). |
-| **Il ping non basta per spegnere** | Il Pi risponde al ping mentre il sistema è già morto: staccare la corrente lì corrompe la SD; non staccarla lascia il rig acceso. | Controllo a due livelli: ping **e** porta 4700. Se l'app è giù ma il ping vive, 90 secondi di grazia e poi corrente via comunque. |
-| **Float del firmware** | Scrivi una posa di `8.19` s, la rileggi come `8.190001` e il confronto esatto fallisce. | Pose arrotondate a 1 decimale e confronto con tolleranza di 5 ms. |
-| **ASIAIR spento = socket zombie** | Il box spento non manda FIN/RST: la connessione di guida resta aperta per sempre e la telemetria muore **in silenzio**. | TCP keepalive + riconnessione forzata se il socket tace oltre N secondi. |
-| **`rsync` rc=24** | "File vanished": un FITS ancora in scrittura sull'ASIAIR. Trattarlo come errore fatale annullava tutto lo spegnimento. | Tollerato come avviso: il file si riprende al sync successivo. |
-| **Tempo AUTO dei flat al tetto** | A gain 0 e pannello al 50% il tempo calcolato tocca il limite di 15 s e talvolta il calcolo **fallisce**: l'autorun non parte proprio. | Luminosità del pannello diversa per gain, così la posa cade in mezzo alla finestra utile. |
-| **L'ASIAIR ammucchia i frame** | Tutte le notti finiscono nella stessa cartella per tipo, e non è configurabile. | Lo smistamento per data lo fa il sync **in destinazione**, leggendo la data dal nome file. |
-| **Timeout systemd sugli oneshot** | È **disabilitato** di default: un ciclo appeso su una CIFS morta blocca il timer **per sempre**. | `TimeoutStartSec` esplicito nella unit. |
+| **`value: 0` on the flat panel** | The firmware reads 0 as `state:false` and the panel **OPENS** instead of turning off. | "Closed and off" is `value:5, state:true`. Never zero on a PWM output. |
+| **`is_plan_started` lies** | It stays `true` after the plan has been stopped: it does not mean "currently imaging". | "Currently imaging" requires `plan_started` **and** `capturing`. |
+| **An interrupted plan won't restart** | `start_exposure` on a half-finished plan does nothing useful: it must be **reset** first. | `reset_plan()`, verified against `get_plan` (lapsed 0, left == total). |
+| **Ping is not enough to power down** | The Pi answers pings while the system is already dead: cutting power then corrupts the SD card, not cutting it leaves the rig powered all day. | Two-level check: ping **and** port 4700. If the app is down but ping still answers, 90 seconds of grace, then power off anyway. |
+| **Firmware floats** | You write an exposure of `8.19` s, read back `8.190001`, and an exact comparison fails. | Exposures rounded to one decimal, compared with a 5 ms tolerance. |
+| **A powered-off ASIAIR is a zombie socket** | The box sends no FIN/RST when it dies: the guiding connection stays open forever and telemetry dies **silently**. | TCP keepalive plus a forced reconnect if the socket goes quiet beyond N seconds. |
+| **`rsync` rc=24** | "File vanished": a FITS still being written on the ASIAIR. Treating it as fatal aborted the entire shutdown. | Tolerated as a warning: the file is picked up on the next sync. |
+| **AUTO flat exposure hits the ceiling** | At gain 0 with the panel at 50%, the computed exposure clamps at 15 s and sometimes the calculation **fails outright**: the autorun never starts. | Per-gain panel brightness, so the exposure lands in the middle of the usable window. |
+| **The ASIAIR piles everything together** | Every night's frames land in the same folder per type, and it isn't configurable in the app. | Sorting by date is done by the sync **at the destination**, reading the date from the filename. |
+| **systemd timeout on oneshot units** | It is **disabled** by default: one cycle hung on a dead CIFS mount blocks the timer **forever**. | An explicit `TimeoutStartSec` in the unit. |
 
 ---
 
-## Test
+## Tests
 
-Dodici script di test **completamente offline**: niente rig, niente rete,
-niente NAS. Usano finti ASIAIR, finti Google Sheet in memoria e sandbox
-temporanee, e coprono i guasti veri che hanno generato le contromisure qui
-sopra.
+Twelve test scripts, **entirely offline**: no rig, no network, no NAS. They use
+fake ASIAIRs, an in-memory fake Google Sheet and temporary sandboxes, and they
+cover the real failures that produced the safeguards listed above.
 
 ```bash
 for t in test/test_*.py; do python3 "$t" && echo "OK $t"; done
 ```
 
-Durano pochi secondi in tutto. Se tocchi il codice, falli girare prima di
-mandare l'agente in produzione su una notte serena.
+They take a few seconds in total. If you touch the code, run them before letting
+the agent loose on a clear night.
 
 ---
 
-## Note oneste, prima che tu ci metta le mani
+## Honest notes, before you build on this
 
-- **Il progetto è cucito sul mio setup.** Camera mono con ruota portafiltri,
-  montatura equatoriale, flat panel motorizzato, prese Kasa, tetto Alpaca. Con
-  un setup diverso alcune parti non ti serviranno e altre andranno riscritte.
-- **Non è testato su altri impianti.** Funziona sul mio, tutte le notti, ma non
-  ho modo di provarlo altrove.
-- **Il protocollo ASIAIR non è ufficiale né documentato.** È stato ricostruito
-  osservando il traffico dell'app. ZWO può cambiarlo a ogni aggiornamento senza
-  dire niente a nessuno — ed è quello che è successo con la v3.
-- **Automatizzare un rig significa poterlo rompere.** Qui si comandano
-  montatura, corrente e spegnimenti: parti con `--dry-run`, poi con un pezzo
-  alla volta, e stai a guardare le prime notti. Il software è fornito **così
-  com'è, senza garanzia**: quello che succede al tuo strumento è responsabilità
-  tua.
-- **Nessun automatismo di ripiego sugli errori.** Se qualcosa va storto durante
-  i flat, il flusso si ferma e **lascia il rig acceso**, avvisando su Telegram.
-  È una scelta: preferisco alzarmi e guardare piuttosto che far indovinare a un
-  programma.
-
----
-
-## Contributi
-
-Segnalazioni e pull request sono benvenute, soprattutto se riguardano il
-**protocollo** (metodi nuovi, differenze fra firmware, comportamenti diversi dai
-miei). Se hai catturato qualcosa dall'app che qui non c'è, apri una issue: la
-mappa in `docs/PROTOCOLLO_ASIAIR.md` cresce così.
+- **The project is tailored to my setup.** Mono camera with a filter wheel,
+  equatorial mount, motorised flat panel, Kasa plugs, Alpaca roof. With a
+  different setup some parts won't apply and others will need rewriting.
+- **It is not tested on any other rig.** It works on mine, every night, but I
+  have no way to try it elsewhere.
+- **The ASIAIR protocol is neither official nor documented.** It was
+  reconstructed by watching the app's traffic. ZWO can change it in any update
+  without telling anyone — which is exactly what happened with v3.
+- **Automating a rig means being able to break it.** This code drives a mount,
+  mains power and shutdowns: start with `--dry-run`, then one piece at a time,
+  and watch the first few nights. The software is provided **as is, without
+  warranty**: what happens to your equipment is your responsibility.
+- **There is no automatic fallback on errors.** If something goes wrong during
+  flats, the flow stops and **leaves the rig powered on**, with a Telegram
+  warning. That's deliberate: I'd rather get up and look than let a program
+  guess.
 
 ---
 
-## Licenza
+## Contributing
 
-**MIT** — vedi [LICENSE](LICENSE). Usalo, modificalo, fanne quello che vuoi;
-tieni l'attribuzione e non chiedermi garanzie.
+Issues and pull requests are welcome, especially about the **protocol**: new
+methods, differences between firmware versions, behaviour that doesn't match
+mine. If you've captured something from the app that isn't documented here, open
+an issue — that's how the map in `docs/ASIAIR_PROTOCOL.md` grows.
 
-`tools/asiair-tool/` contiene materiale di terze parti, anch'esso MIT: vedi
-`tools/asiair-tool/LICENSE` e `ORIGINE.md`.
+Italian and English are both fine.
+
+---
+
+## License
+
+**MIT** — see [LICENSE](LICENSE). Use it, change it, do what you like with it;
+keep the attribution and don't ask me for guarantees.
+
+`tools/asiair-tool/` contains third-party material, also MIT: see
+`tools/asiair-tool/LICENSE` and `ORIGINE.md`.
 
 ---
 

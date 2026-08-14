@@ -1,5 +1,7 @@
 # Raggiungere un ASIAIR remoto
 
+*[English](../NETWORK.md) · **Italiano***
+
 Se il tuo ASIAIR è in giardino, salta pure questa pagina: è già in rete con te.
 Se invece è in un osservatorio remoto a qualche migliaio di chilometri, il
 problema da risolvere è uno solo — **fare in modo che il server veda l'ASIAIR

@@ -1,5 +1,7 @@
 # Installazione
 
+*[English](../INSTALL.md) · **Italiano***
+
 Guida per mettere l'agente in produzione su un server Linux sempre acceso.
 Testata su Debian/Ubuntu; su altre distribuzioni cambiano solo i nomi dei
 pacchetti.

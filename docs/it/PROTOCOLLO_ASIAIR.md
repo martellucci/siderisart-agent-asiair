@@ -1,5 +1,7 @@
 # Il protocollo ASIAIR, ricostruito
 
+*[English](../ASIAIR_PROTOCOL.md) · **Italiano***
+
 > **Cos'e' questo documento.** Il protocollo dell'ASIAIR non e' pubblico ne'
 > documentato: quello che segue e' stato ricostruito osservando il traffico
 > dell'app e provando i comandi **dal vivo** su un box vero, notte dopo notte.
@@ -8,7 +10,7 @@
 > sono davvero utili.
 >
 > **Validato su firmware v1.** Dalla v3 il canale 4700 richiede un handshake
-> RSA: vedi `docs/CREDENZIALI.md`.
+> RSA: vedi [CREDENZIALI.md](CREDENZIALI.md).
 >
 > ZWO puo' cambiare tutto a ogni aggiornamento, senza dirlo a nessuno.
 > Se trovi differenze sul tuo box, apri una issue: questa mappa cresce cosi'.

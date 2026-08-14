@@ -1,5 +1,7 @@
 # Credenziali — cosa serve e come procurarselo
 
+*[English](../CREDENTIALS.md) · **Italiano***
+
 Nel repo **non c'è nessuna credenziale**: i file `.txt` che trovi sono modelli
 vuoti, e i file che contengono chiavi vere non sono pubblicati affatto. Questa
 pagina spiega, uno per uno, come comporli.

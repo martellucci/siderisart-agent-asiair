@@ -13,4 +13,4 @@ perche' servono alla migrazione a ASIAIR v3 e non si vuole dipendere da un clone
 
 NB: i metodi in `RPC_METHODS.md` sono verificati su **firmware 43.97**, noi siamo
 su **13.41**. Le differenze note (forma degli eventi, handshake) sono annotate in
-`../../docs/PROTOCOLLO_ASIAIR.md`, sezione "AGGIORNAMENTI 2026-08-12".
+`../../docs/it/PROTOCOLLO_ASIAIR.md`, sezione "AGGIORNAMENTI 2026-08-12".
