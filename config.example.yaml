@@ -1,0 +1,275 @@
+# ---------------------------------------------------------------------------
+# CONFIGURAZIONE DI ESEMPIO — copiala in config.yaml e compila i campi.
+#
+#   cp config.example.yaml config.yaml
+#
+# I valori vuoti, gli 0.0 e gli indirizzi 192.0.2.x / 198.51.100.x /
+# 203.0.113.x sono SEGNAPOSTO: sono reti riservate alla documentazione
+# (RFC 5737) e non esistono da nessuna parte. Sostituiscili con i tuoi.
+# I punti da compilare sono marcati con "<<<".
+# ---------------------------------------------------------------------------
+# Configurazione PRODUZIONE.
+# Stato tetto: API ASCOM Alpaca UFFICIALE SFRO (HTTPS pubblico, NESSUNA VPN).
+# La VPN (router DR7) serve solo per la sync immagini ASIAIR (CIFS).
+roof_key: roof1            # etichetta libera del tetto/cupola
+timezone_observatory: America/Chicago
+# <<< METTI LE TUE COORDINATE: servono a calcolare la notte nautica.
+location: {name: Il mio osservatorio, latitude: 0.0, longitude: 0.0}
+
+roof:
+  alpaca_base: https://alpaca-api.example.org   # <<< endpoint ASCOM Alpaca del tuo tetto
+  device_number: 1          # <<< numero del device SafetyMonitor Alpaca
+
+files: {kasa: kasa.txt, telegram: telegram.txt, asiair: asiair.txt}
+
+# Telemetria MQTT (servizio sfro_mqtt, sola lettura) verso Home Assistant.
+mqtt:
+  enabled: true
+  host: "192.0.2.20"        # <<< IP del broker MQTT (es. Mosquitto su Home Assistant)
+  port: 1883
+  base_topic: "sfro"
+  creds_file: "mqtt.txt"      # username=.. / password=.. (vuoto se broker anonimo)
+  discovery: false           # sensori configurati a mano in HA (no duplicati)
+  discovery_prefix: "homeassistant"
+  guide_interval_seconds: 15  # pubblica la guida ogni 15s
+  guide_window_seconds: 120   # RMS su finestra mobile di 2 min
+  slow_interval_seconds: 600  # resto (sessione/camera/mount/fuoco/storage) ogni 10 min
+  guide_arcsec_scale: 1.0     # i valori GuideStep sono GIA' in arcsec; moltiplicatore
+                              # di calibrazione fine (se HA legge diverso da ASIAIR)
+  guide_stale_seconds: 600    # listener guida: riconnetti se il socket 4400 resta
+                              # muto oltre questo (anti-zombie: ASIAIR spento non
+                              # manda FIN/RST; visto 2026-07-04→07, 3 notti a zero)
+  device_name: "SFRO ASIAIR"
+
+kasa:
+  cloud_base: https://wap.tplinkcloud.com
+  # La presa è una power strip KP303 (3 prese). device_id = la strip.
+  plug_alias: ""
+  device_id: ""             # <<< id della presa/ciabatta Kasa (docs/CREDENZIALI.md)
+  outlets: ["Asiair", "Mount"]   # prese da accendere all'apertura del tetto
+  auto_power_on: true            # accensione automatica all'apertura del tetto
+  terminal_uuid: ""
+
+# Notte Nautica: l'agente opera SOLO sotto i -12° del sole (calcolata dalle coord).
+nautical: {depression: 12}
+# Cadenza dei messaggi di STATO ricorrenti (attesa device / Kasa accesa per i flat).
+status_interval_minutes: 10
+
+# ASIAIR (canali 4700 imager, 4400 guider). NB: l'agente NON connette i device —
+# li collega l'UTENTE dall'app; l'agente VERIFICA che siano connessi, poi apre OF2
+# e avvia il piano. start = start_exposure["light"]; verifica = get_enabled_plan.
+asiair:
+  enabled: true
+  host: "198.51.100.20"      # <<< IP dell'ASIAIR (via VPN se remoto)
+  port: 4700                # canale imager/plan (camera, EAF, EFW, autorun)
+  guider_port: 4400         # canale guider/mount (mount + camera guida)
+  auto_start: true
+  auto_stop: true
+  timeout_seconds: 8
+  # Sonda VPN: a rig spento NESSUN host SFRO risponde all'echo diretto (falsi
+  # negativi, visto 2026-07-06); vpn_diagnose usa PRIMA l'ICMP "host unreachable"
+  # del router SFRO (From 172.*) attraverso il tunnel, la sonda e' solo fallback.
+  vpn_probe_host: "198.51.100.1"   # <<< IP del router remoto (sonda VPN)
+  # I 5 device che DEVONO risultare connessi (collegati dall'utente via app).
+  required_devices: ["camera", "focuser", "wheel", "mount", "guide"]
+  # Flat panel OF2 (uscita 'flat_panel'). Aperto (state=false) come ULTIMO passo prima
+  # dell'avvio (poi attende il motore); chiuso (state=true) nel teardown.
+  flat_panel:
+    enabled: true
+    open_wait_seconds: 7
+    brightness: 5
+  # PRE-AVVIO piano (2026-07-19): anti-dew camera acceso (se spento) e
+  # fascia anticondensa (output 4) a questa percentuale. Errori non
+  # bloccanti ma segnalati su Telegram (anti-dew spento il 19/7: ~10 pose
+  # rovinate).
+  start_dew_heater_pct: 100
+  # GATE POSIZIONE: avvia SOLO se il mount è già alle coord SFRO (verifica, non forza).
+  expected_lat: 0.0         # <<< le TUE coordinate (le stesse di 'location')
+  expected_lon: 0.0
+  position_tolerance_deg: 0.2
+  set_location: false
+  # TEARDOWN — comandi da CATTURARE dall'app (a ASIAIR libero) e poi compilare qui.
+  # Finché 'method' è vuoto, l'agente NON inventa il comando: salta il passo e lo
+  # segnala nel messaggio di teardown.
+  #   mount_home: {port: 4400, method: "<da_catturare>", params: []}
+  #   cooler_off: {port: 4700, method: "set_control_value", params: ["CoolerOn", 0]}
+  mount_home: {port: 4400, method: "scope_park", params: []}   # AM5N home/park (catturato 2026-06-30)
+  # cooler off = cooler + anti-dew (catturati 2026-06-30); eseguiti in ordine.
+  cooler_off:
+    - {port: 4700, method: "set_control_value", params: ["CoolerOn", 0]}
+    - {port: 4700, method: "set_control_value", params: ["AntiDewHeater", 0]}
+  # spegnimento ASIAIR (catturato dall'app 2026-07-03): result 0, poi il box muore.
+  shutdown: {port: 4700, method: "pi_shutdown", params: []}
+  # pagina per l'avvio dell'autorun flat: start_exposure agisce sul contesto
+  # corrente (pagina "plan" -> avvia il PIANO; "preview" -> scatta UNA posa).
+  # La pagina dell'Autorun a protocollo si chiama "autosave" (probe 2026-07-03;
+  # "autorun" NON esiste: code 109).
+  flat_page: "autosave"
+
+# Flat automatici + spegnimento totale a fine sessione (piano validato 2026-07-03).
+# Trigger: alba nautica O piano fermo 10m (NON chiusura meteo). Il teardown tiene il
+# cooler acceso; dopo l'asciugatura: pannello a brightness%, autorun flat (gia'
+# programmato dall'utente sull'ASIAIR), sync NAS, cooler off, pi_shutdown,
+# ping finche' il box non muore, KASA tutta OFF. Errori: STOP + tutto acceso.
+# Avvio anticipato del rig (2026-07-04): da T-lead dal crepuscolo nautico e per
+# tutta la notte, SOLO QUANDO IL TETTO E' APERTO, l'agente accende KASA, aspetta
+# il boot, connette i 5 device (priming get_connected_cameras + scope_set_time
+# al mount) e avvia il piano (il flat panel lo apre ac.start). Tetto chiuso =
+# tutto resta spento; apertura tardiva gestita dalla logica in-night.
+# DISABILITATO 2026-07-09 (richiesta utente dopo il guasto mount della notte
+# 8/9-7): si torna alla modalita' collaudata 2026-06-30 — l'utente accende
+# l'ASIAIR la sera e collega i device dall'app; l'agente VERIFICA i 5 device
+# e (gate posizione + OF2) avvia SOLO il piano. connect_all/scope_set_time
+# dell'agente non vengono piu' usati finche' enabled resta false.
+startup:
+  enabled: false
+  lead_minutes: 5
+  ping_timeout_seconds: 240
+
+flat_flow:
+  enabled: true
+  # Selezione slot per-sessione + dark flat (2 passate) — 2026-07-05.
+  # session_slots: abilita solo gli slot FLAT dei filtri usati stanotte
+  # (set_sequence; reset obbligatorio prima di editare). dark_flats: seconda
+  # passata a pannello spento con gli slot DARK degli stessi filtri;
+  # dark_flat_max_exp_seconds esclude i dark 'library' semestrali (300/600s).
+  session_slots: true      # attivi dal 2026-07-05 (scenari live H e H+S superati)
+  dark_flats: true
+  # Esclusione dark 'library' a lunga posa: slot dark con exp PREIMPOSTATO
+  # oltre questo valore non vengono MAI toccati dal flusso (l'utente li crea
+  # ad hoc quando servono).
+  dark_flat_max_exp_seconds: 30
+  dry_wait_minutes: 30          # asciugatura condensa a pannello chiuso (30' dal 2026-07-09)
+  # GATE TEMPERATURA pre-flat (2026-07-24): flat/dark alla stessa temperatura
+  # dei light. Target letto dalla camera (TargetTemp dell'app); se il cooler
+  # e' spento viene riacceso (con anti-dew) e i flat aspettano finche' la
+  # camera non e' entro la tolleranza; oltre il tempo massimo -> STOP.
+  camera_temp_tolerance: 2      # gradi sopra il target ancora accettabili
+  camera_cool_max_minutes: 30   # attesa massima raffreddamento pre-flat
+  brightness: 85                # luce flat di FALLBACK (MAI 0: il pannello si APRIREBBE)
+  # Luminosità pannello PER FILTRO — dal 2026-07-24: 50% LRGB, 75% SHO
+  # (richiesta utente: il pannello non è lineare tra notte e giorno a parità
+  # di %, quindi luminosità fisse + tempo di posa AUTO + gain camera uguale a
+  # quello dei light della notte). I filtri di sessione vengono raggruppati
+  # per (gain, luminosità) e ogni gruppo fa il SUO autorun flat.
+  # Filtro non in mappa -> 'brightness' qui sopra.
+  brightness_by_filter: {L: 50, R: 50, G: 50, B: 50, S: 75, H: 75, O: 75}
+  # GAIN 0: al 50% il tempo AUTO dei flat RGB finisce al tetto ASIAIR (~15s:
+  # il 2026-07-25 R/G/B tutti a 15.0s esatti; il 2026-07-26 il calcolo su B e'
+  # FALLITO e l'autorun non e' mai partito). Con gain 0 i filtri qui sotto
+  # scavalcano la mappa sopra: 67% (misure live 26/7 a 65%: R 9.1s B 7.1s G 3.1s;
+  # a 67% attesi ~R 7s B 5.5s G 2.5s, tutti comodi nella finestra 1-15s)
+  # Scelta utente 2026-07-26.
+  brightness_by_filter_gain0: {R: 67, G: 67, B: 67}
+  idle_brightness: 5            # "chiuso e spento" (luce trascurabile)
+  # Fascia anticondensa = uscita 'dew_heater' (output 4) dell'ASIAIR: al
+  # 100% durante l'asciugatura pre-flat, riportata al 5% ("spenta") subito
+  # prima dello shutdown finale (richiesta utente 2026-07-30, prima era 50%).
+  # 5 e non 0: con value 0 il firmware forza state=false — vietato sulle
+  # uscite PWM.
+  dew_heater_dry_pct: 100
+  dew_heater_end_pct: 5
+  # Flat/dark MANUALI dal menu Telegram (bottone Flat/Dark, 2026-08-01): stesso
+  # flusso di sempre (asciugatura -> flat -> dark -> sync), ma alla fine lo
+  # spegnimento si CHIEDE invece di eseguirlo. Se non arriva risposta entro
+  # questo tempo l'agente non spegne nulla e lascia il rig acceso.
+  manual_ask_timeout_minutes: 60
+  flat_max_minutes: 90          # watchdog: autorun flat oltre questo tempo -> errore
+  shutdown_wait_seconds: 15     # attesa fissa dopo pi_shutdown prima dei ping
+  shutdown_ping_timeout_seconds: 120  # KASA giu' solo quando l'ASIAIR non pinga piu'
+  # Talvolta il Pi continua a rispondere al PING mentre l'app e' gia' spenta e
+  # il box e' morto: l'unico rimedio e' togliere corrente (utente 2026-08-05,
+  # dopo il flusso flat abortito il 5/8 con la KASA lasciata accesa). Se la
+  # porta 4700 non accetta piu' connessioni l'agente aspetta questi secondi
+  # (il sistema finisce di scrivere sulla SD) e stacca comunque la KASA.
+  shutdown_grace_seconds: 90
+
+# Storico sessioni: FITS (NAS) -> SQLite -> Google Sheet "Diario Astrofotografia"
+# (condiviso tra postazioni dal 2026-07-05: tab Sessioni con colonna Location;
+# il push riscrive SOLO le righe con Location=location_label, le altre
+# postazioni si preservano).
+# Dal 2026-08-12 il diario NON contiene piu' il dettaglio per-frame (cresceva di
+# ~1.600 righe/mese e rendeva il foglio illeggibile): il Google Sheet tiene solo
+# Sessioni + i due riepiloghi, il dettaglio va in CSV per notte sul NAS e le
+# statistiche si leggono sulla dashboard HTML (sezione 'report').
+# Solo LIGHT. Push per-ciclo durante la ripresa + ai 3 trigger di fine
+# (tetto chiuso / alba nautica / piano fermo 10m a tetto aperto).
+session_log:
+  enabled: true
+  db_file: /var/lib/sfro-agent/sessions.db
+  scan_dir: /mnt/astronomia/asiair_sfro/ASIAIR/Plan/Light
+  guide_sink_dir: /var/lib/sfro-agent/guide   # scritto da sfro_mqtt (GuideStep JSONL)
+  focus_sink_dir: /var/lib/sfro-agent/focus   # scritto da sfro_mqtt (AutoFocus JSONL):
+                                              # alimenta "HFR migliore"/"N autofocus".
+                                              # Senza questa chiave il publisher NON
+                                              # scrive il sink e le colonne restano vuote.
+  backfill_days: 30            # alla 1a esecuzione ingerisce solo file recenti
+  sheet_id: ""              # <<< id del tuo Google Sheet (vuoto = diario disattivato)
+  sa_json: /opt/sfro-agent/gdrive_sa.json     # chiave JSON del service account GCP
+  tab_sessions: Sessioni
+  tab_detail: ""               # VUOTO = dettaglio per-frame NON piu' su Sheets
+                               # (storico riversato in CSV il 2026-08-12 e tab
+                               # Dettaglio_SFRO eliminata)
+  tab_by_object: Per soggetto  # riepiloghi riscritti a ogni push (poche righe)
+  tab_by_month: Per mese
+  detail_csv_dir: /mnt/astronomia/asiair_sfro/Diario/dettaglio   # SFRO_aaaammgg.csv
+  location_label: SFRO
+  idle_finalize_minutes: 10    # piano fermo da N min a tetto aperto -> chiusura log
+
+# Dashboard statistiche (sfro_report.py): pagina HTML autonoma rigenerata a ogni
+# push del diario e a fine notte, servita da Apache sul server.
+report:
+  enabled: true
+  out_dir: /var/www/html/sfro/statistiche
+  url: "http://192.0.2.10/sfro/statistiche"   # <<< URL pubblica della dashboard
+  detail_nights: 10            # notti con la tabella per-frame in fondo alla pagina
+  chart_nights: 60             # notti mostrate nei grafici temporali
+  rms_bad: 1.0                 # RMS (") oltre il quale il frame e' "da rivedere"
+  rms_peak_gate: 25.0          # picco (") oltre il quale il frame esce dalle mediane:
+                               # non e' guida scarsa ma montatura in movimento (dither
+                               # non dichiarato fino in fondo, slew, fine piano). Nei
+                               # dati 2026 le due popolazioni sono separate da un vuoto
+                               # netto fra 20" e 30". 0 = nessuna esclusione.
+  targets: {}                  # ore obiettivo per soggetto, es. {NGC 7000: 60}
+
+telegram: {enabled: true}
+
+# Bot Telegram interattivo /sfro (servizio persistente sfro-telegram.service):
+# menu Status / Start / Go Plan / Shutdown con conferme a bottoni.
+telegram_bot:
+  enabled: true
+  poll_timeout_seconds: 50   # long polling getUpdates
+
+# Marker scritto dallo Shutdown manuale del bot: se e' della notte corrente,
+# l'agente NON riaccende il rig (lo Start manuale lo cancella).
+manual_shutdown_file: /var/lib/sfro-agent/manual_shutdown.json
+# Scambio bot <-> agente per i FLAT/DARK MANUALI (2026-08-01): il bot scrive la
+# richiesta (dopo aver fermato il piano e chiuso OF2), l'agente esegue il flusso;
+# a fine flusso l'agente chiede lo spegnimento e il bot scrive la risposta.
+manual_flat_request_file: /var/lib/sfro-agent/flat_request.json
+manual_flat_reply_file: /var/lib/sfro-agent/flat_reply.json
+# Cooldown per NON ripetere lo stesso avviso d'errore ad ogni ciclo (min).
+alert_cooldown_minutes: 30
+
+# Sync immagini ASIAIR -> NAS. Dal 2026-07-26 i frame vengono SMISTATI PER DATA
+# in destinazione (l'ASIAIR li ammucchia tutti insieme e non e' configurabile):
+#   Autorun/Flat/<aaaammgg>/ · Autorun/Dark/<aaaammgg>/
+#   Plan/Light/<Soggetto>/<aaaammgg>/
+# La data e' quella nel nome file (= night_id). Il resto della share (Preview,
+# Live, Video, log) resta invariato. NB: cambiare questo layout richiede di
+# rispostare a mano lo storico sul NAS, altrimenti rsync riscarica tutto.
+sync_module:
+  enabled: true
+  asiair_ip: "198.51.100.20"           # <<< lo stesso IP di asiair.host
+  smb_share_name: "TF Images"
+  mount_point: /mnt/asiair_sfro
+  credentials_file: /opt/sfro-agent/credentials_asiair
+  nas_dest: /mnt/astronomia           # mount CIFS persistente (fstab)
+  rsync_exclude: ["*.jpg"]
+  rsync_extra: []
+  per_run_cap_minutes: 30
+
+http: {timeout_seconds: 15, retries: 2, retry_backoff_seconds: 3}
+state_file: /var/lib/sfro-agent/state.json
+log_level: INFO
+loop_interval_seconds: 300   # loop ogni 5 min durante la notte nautica

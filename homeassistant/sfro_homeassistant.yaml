@@ -1,0 +1,350 @@
+# Home Assistant - sensori MQTT SFRO (configuration.yaml)
+# Le entita' compaiono da sole con MQTT Discovery; questo YAML serve solo
+# se preferisci la configurazione manuale.
+
+mqtt:
+  sensor:
+    - name: "SFRO Guide RMS Totale"
+      unique_id: sfro_guide_rms_total
+      state_topic: sfro/guide
+      value_template: "{{ value_json.rms_total }}"
+      unit_of_measurement: '"'
+      availability_topic: sfro/status
+    - name: "SFRO Guide RMS RA"
+      unique_id: sfro_guide_rms_ra
+      state_topic: sfro/guide
+      value_template: "{{ value_json.rms_ra }}"
+      unit_of_measurement: '"'
+      availability_topic: sfro/status
+    - name: "SFRO Guide RMS Dec"
+      unique_id: sfro_guide_rms_dec
+      state_topic: sfro/guide
+      value_template: "{{ value_json.rms_dec }}"
+      unit_of_measurement: '"'
+      availability_topic: sfro/status
+    - name: "SFRO Guide Picco RA"
+      unique_id: sfro_guide_peak_ra
+      state_topic: sfro/guide
+      value_template: "{{ value_json.peak_ra }}"
+      unit_of_measurement: '"'
+      availability_topic: sfro/status
+    - name: "SFRO Guide Picco Dec"
+      unique_id: sfro_guide_peak_dec
+      state_topic: sfro/guide
+      value_template: "{{ value_json.peak_dec }}"
+      unit_of_measurement: '"'
+      availability_topic: sfro/status
+    - name: "SFRO Soggetto"
+      unique_id: sfro_target
+      state_topic: sfro/session
+      value_template: "{{ value_json.target }}"
+      availability_topic: sfro/status
+    - name: "SFRO Filtro attivo"
+      unique_id: sfro_filter
+      state_topic: sfro/session
+      value_template: "{{ value_json.filter }}"
+      availability_topic: sfro/status
+    - name: "SFRO Tipo sequenza"
+      unique_id: sfro_seq_type
+      state_topic: sfro/session
+      value_template: "{{ value_json.seq_type }}"
+      availability_topic: sfro/status
+    - name: "SFRO Sequenza"
+      unique_id: sfro_sequence
+      state_topic: sfro/session
+      value_template: "{{ value_json.sequence }}"
+      availability_topic: sfro/status
+    - name: "SFRO Frame ripresi"
+      unique_id: sfro_frame_done
+      state_topic: sfro/session
+      value_template: "{{ value_json.frame_done }}"
+      availability_topic: sfro/status
+    - name: "SFRO Frame totali"
+      unique_id: sfro_frame_total
+      state_topic: sfro/session
+      value_template: "{{ value_json.frame_total }}"
+      availability_topic: sfro/status
+    - name: "SFRO Avanzamento"
+      unique_id: sfro_progress
+      state_topic: sfro/session
+      value_template: "{{ value_json.progress_pct }}"
+      unit_of_measurement: '%'
+      availability_topic: sfro/status
+    - name: "SFRO Esposizione"
+      unique_id: sfro_exposure
+      state_topic: sfro/session
+      value_template: "{{ value_json.exp_s }}"
+      unit_of_measurement: 's'
+      device_class: duration
+      availability_topic: sfro/status
+    - name: "SFRO Gain"
+      unique_id: sfro_gain
+      state_topic: sfro/session
+      value_template: "{{ value_json.gain }}"
+      availability_topic: sfro/status
+    - name: "SFRO Tempo rimanente"
+      unique_id: sfro_time_left
+      state_topic: sfro/session
+      value_template: "{{ value_json.left_time_min }}"
+      unit_of_measurement: 'min'
+      device_class: duration
+      availability_topic: sfro/status
+    - name: "SFRO Fine stimata"
+      unique_id: sfro_eta
+      state_topic: sfro/session
+      value_template: "{{ value_json.eta }}"
+      device_class: timestamp
+      availability_topic: sfro/status
+    - name: "SFRO Temperatura sensore"
+      unique_id: sfro_cam_temp
+      state_topic: sfro/camera
+      value_template: "{{ value_json.sensor_temp_c }}"
+      unit_of_measurement: '°C'
+      device_class: temperature
+      availability_topic: sfro/status
+    - name: "SFRO Temperatura target"
+      unique_id: sfro_cam_target_temp
+      state_topic: sfro/camera
+      value_template: "{{ value_json.target_temp_c }}"
+      unit_of_measurement: '°C'
+      device_class: temperature
+      availability_topic: sfro/status
+    - name: "SFRO Potenza raffreddamento"
+      unique_id: sfro_cooler_pct
+      state_topic: sfro/camera
+      value_template: "{{ value_json.cooler_pct }}"
+      unit_of_measurement: '%'
+      availability_topic: sfro/status
+    - name: "SFRO Lato pila"
+      unique_id: sfro_pier_side
+      state_topic: sfro/mount
+      value_template: "{{ value_json.pier_side }}"
+      availability_topic: sfro/status
+    - name: "SFRO AR"
+      unique_id: sfro_ra
+      state_topic: sfro/mount
+      value_template: "{{ value_json.ra_h }}"
+      unit_of_measurement: 'h'
+      availability_topic: sfro/status
+    - name: "SFRO Dec"
+      unique_id: sfro_dec
+      state_topic: sfro/mount
+      value_template: "{{ value_json.dec_deg }}"
+      unit_of_measurement: '°'
+      availability_topic: sfro/status
+    - name: "SFRO Altezza"
+      unique_id: sfro_alt
+      state_topic: sfro/mount
+      value_template: "{{ value_json.alt_deg }}"
+      unit_of_measurement: '°'
+      availability_topic: sfro/status
+    - name: "SFRO Azimut"
+      unique_id: sfro_az
+      state_topic: sfro/mount
+      value_template: "{{ value_json.az_deg }}"
+      unit_of_measurement: '°'
+      availability_topic: sfro/status
+    - name: "SFRO Tensione alimentazione"
+      unique_id: sfro_voltage
+      state_topic: sfro/mount
+      value_template: "{{ value_json.input_voltage_v }}"
+      unit_of_measurement: 'V'
+      device_class: voltage
+      availability_topic: sfro/status
+    - name: "SFRO Posizione EAF"
+      unique_id: sfro_eaf_pos
+      state_topic: sfro/focuser
+      value_template: "{{ value_json.position }}"
+      unit_of_measurement: 'step'
+      availability_topic: sfro/status
+    - name: "SFRO Temperatura EAF"
+      unique_id: sfro_eaf_temp
+      state_topic: sfro/focuser
+      value_template: "{{ value_json.temp_c }}"
+      unit_of_measurement: '°C'
+      device_class: temperature
+      availability_topic: sfro/status
+    - name: "SFRO Spazio libero"
+      unique_id: sfro_disk_free
+      state_topic: sfro/storage
+      value_template: "{{ value_json.free_gb }}"
+      unit_of_measurement: 'GB'
+      device_class: data_size
+      availability_topic: sfro/status
+    - name: "SFRO Spazio libero %"
+      unique_id: sfro_disk_free_pct
+      state_topic: sfro/storage
+      value_template: "{{ value_json.free_pct }}"
+      unit_of_measurement: '%'
+      availability_topic: sfro/status
+    - name: "SFRO HFR ultimo autofocus"
+      unique_id: sfro_hfr
+      state_topic: sfro/focuser
+      value_template: "{{ value_json.hfr }}"
+      state_class: measurement
+      availability_topic: sfro/status
+    # --- 2026-08-12: eventi push della 4700 (sfro/pi) e volt/ampere (sfro/power)
+    - name: "SFRO Stato esposizione"
+      unique_id: sfro_exp_state
+      state_topic: sfro/session
+      value_template: "{{ value_json.exp_state }}"
+      availability_topic: sfro/status
+    - name: "SFRO Temperatura CPU"
+      unique_id: sfro_pi_temp
+      state_topic: sfro/pi
+      value_template: "{{ value_json.temp_c }}"
+      unit_of_measurement: '°C'
+      device_class: temperature
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Potenza totale"
+      unique_id: sfro_power_total
+      state_topic: sfro/power
+      value_template: "{{ value_json.total_w }}"
+      unit_of_measurement: 'W'
+      device_class: power
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Tensione uscite"
+      unique_id: sfro_power_input_v
+      state_topic: sfro/power
+      value_template: "{{ value_json.input_v }}"
+      unit_of_measurement: 'V'
+      device_class: voltage
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Corrente fascia anticondensa"
+      unique_id: sfro_power_dew_a
+      state_topic: sfro/power
+      value_template: "{{ value_json.dew_heater_a }}"
+      unit_of_measurement: 'A'
+      device_class: current
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Corrente camera"
+      unique_id: sfro_power_cam_a
+      state_topic: sfro/power
+      value_template: "{{ value_json.camera_a }}"
+      unit_of_measurement: 'A'
+      device_class: current
+      state_class: measurement
+      availability_topic: sfro/status
+  binary_sensor:
+    - name: "SFRO Guida attiva"
+      unique_id: sfro_guiding
+      state_topic: sfro/guide
+      value_template: "{{ 'ON' if value_json.guiding else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: running
+      availability_topic: sfro/status
+    - name: "SFRO Stella persa"
+      unique_id: sfro_star_lost
+      state_topic: sfro/guide
+      value_template: "{{ 'ON' if value_json.star_lost else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: problem
+      availability_topic: sfro/status
+    - name: "SFRO Dither in corso"
+      unique_id: sfro_dithering
+      state_topic: sfro/guide
+      value_template: "{{ 'ON' if value_json.dithering else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: running
+      availability_topic: sfro/status
+    - name: "SFRO Piano in esecuzione"
+      unique_id: sfro_plan_started
+      state_topic: sfro/session
+      value_template: "{{ 'ON' if value_json.plan_started else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: running
+      availability_topic: sfro/status
+    - name: "SFRO Raffreddamento ON"
+      unique_id: sfro_cooler_on
+      state_topic: sfro/camera
+      value_template: "{{ 'ON' if value_json.cooler_on else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: running
+      availability_topic: sfro/status
+    - name: "SFRO Tracking"
+      unique_id: sfro_tracking
+      state_topic: sfro/mount
+      value_template: "{{ 'ON' if value_json.tracking else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: running
+      availability_topic: sfro/status
+    - name: "SFRO Notte nautica"
+      unique_id: sfro_in_night
+      state_topic: sfro/agent
+      value_template: "{{ 'ON' if value_json.in_nautical_night else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: running
+      availability_topic: sfro/status
+    - name: "SFRO Ripresa in corso"
+      unique_id: sfro_imaging
+      state_topic: sfro/agent
+      value_template: "{{ 'ON' if value_json.imaging_active else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: running
+      availability_topic: sfro/status
+    - name: "SFRO ASIAIR online"
+      unique_id: sfro_asiair_online
+      state_topic: sfro/agent
+      value_template: "{{ 'ON' if value_json.asiair_online else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: connectivity
+      availability_topic: sfro/status
+    - name: "SFRO Flip al meridiano"
+      unique_id: sfro_merid_flip
+      state_topic: sfro/session
+      value_template: "{{ 'ON' if value_json.merid_flip else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: running
+      availability_topic: sfro/status
+    # --- 2026-08-12: salute del Pi dagli eventi push PiStatus (sfro/pi)
+    - name: "SFRO Sottotensione"
+      unique_id: sfro_undervolt
+      state_topic: sfro/pi
+      value_template: "{{ 'ON' if value_json.undervolt else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: problem
+      availability_topic: sfro/status
+    - name: "SFRO Sovracorrente"
+      unique_id: sfro_overcurrent
+      state_topic: sfro/pi
+      value_template: "{{ 'ON' if value_json.overcurrent else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: problem
+      availability_topic: sfro/status
+    - name: "SFRO CPU in sovratemperatura"
+      unique_id: sfro_overtemp
+      state_topic: sfro/pi
+      value_template: "{{ 'ON' if value_json.overtemp else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: problem
+      availability_topic: sfro/status
+
+# --- Sensori DIRETTI (letti da HA, senza agente) ---
+binary_sensor:
+  - platform: rest
+    name: SFRO Tetto
+    unique_id: sfro_roof
+    resource: https://alpaca-api.example.org/api/v1/safetymonitor/6/issafe
+    method: GET
+    value_template: "{{ value_json.Value }}"
+    device_class: opening      # on = tetto aperto (Value=true)
+    scan_interval: 60
+# ASIAIR online: gia' coperto via MQTT (sfro/agent -> asiair_online).
+# In alternativa, integrazione 'Ping' (ICMP) verso 198.51.100.20 da UI.

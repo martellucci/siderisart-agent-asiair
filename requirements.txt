@@ -1,0 +1,3 @@
+requests>=2.31
+astral>=3.2
+PyYAML>=6.0

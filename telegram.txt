@@ -1,0 +1,15 @@
+# Riferimenti del bot Telegram (notifiche + bot interattivo /sfro).
+#
+#   bot_token : lo fornisce @BotFather quando crei il bot
+#   chat_id   : id della chat/gruppo dove scrivere. Per ottenerlo scrivi un
+#               messaggio al bot e apri
+#               https://api.telegram.org/bot<IL_TUO_TOKEN>/getUpdates
+#   thread_id : opzionale, solo se scrivi in un topic di un supergruppo
+#
+# NON COMMITTARE QUESTO FILE DOPO AVERLO COMPILATO:
+#     git update-index --skip-worktree telegram.txt
+#
+# chmod 600 telegram.txt
+bot_token=
+chat_id=
+# thread_id=

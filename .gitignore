@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# SEGRETI — non devono MAI finire in un commit.
+# ---------------------------------------------------------------------------
+# Configurazione reale (nel repo c'e' solo config.example.yaml)
+config.yaml
+config.*.yaml
+!config.example.yaml
+
+# Chiavi private e credenziali
+*.pem
+*.key
+*.p12
+gdrive_sa.json
+credentials_asiair
+credentials_*
+*.ovpn
+*.conf
+.env
+
+# I quattro .txt di credenziali SONO tracciati, come modelli vuoti.
+# Dopo averli compilati dì a git di ignorarne le modifiche:
+#     git update-index --skip-worktree kasa.txt telegram.txt mqtt.txt asiair.txt
+
+# ---------------------------------------------------------------------------
+# DATI — locali alla tua installazione
+# ---------------------------------------------------------------------------
+state.json
+manual_shutdown.json
+flat_request.json
+flat_reply.json
+*.db
+*.sqlite3
+*.jsonl
+*.fits
+*.fit
+*.csv
+*.log
+
+# ---------------------------------------------------------------------------
+# Python e sistema
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.DS_Store

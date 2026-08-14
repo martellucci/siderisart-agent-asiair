@@ -1,0 +1,9 @@
+# Credenziali del broker MQTT (es. Mosquitto su Home Assistant).
+# Se il broker e' anonimo lascia i campi vuoti oppure cancella il file.
+#
+# NON COMMITTARE QUESTO FILE DOPO AVERLO COMPILATO:
+#     git update-index --skip-worktree mqtt.txt
+#
+# chmod 600 mqtt.txt
+username=
+password=

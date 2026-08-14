@@ -1,0 +1,12 @@
+# Connessione di CONTROLLO all'ASIAIR usata dagli strumenti a riga di comando.
+# Sul firmware v1 i canali TCP non richiedono autenticazione: basta essere nella
+# stessa rete (o dentro la VPN).
+#
+#   host        : IP dell'ASIAIR (lo stesso di asiair.host nel config)
+#   port        : 4700 = canale imager/piano (camera, EAF, EFW, autorun)
+#   guider_port : 4400 = canale guider/mount
+#
+# chmod 600 asiair.txt
+host=
+port=4700
+guider_port=4400

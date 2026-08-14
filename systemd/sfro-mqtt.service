@@ -1,0 +1,15 @@
+[Unit]
+Description=SFRO MQTT telemetry publisher (read-only ASIAIR -> Home Assistant)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sfro-agent
+ExecStart=/usr/bin/python3 /opt/sfro-agent/sfro_mqtt.py --config /opt/sfro-agent/config.yaml
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target

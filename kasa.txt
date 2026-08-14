@@ -1,0 +1,10 @@
+# Credenziali dell'account TP-Link/Kasa (cloud), usate per accendere e spegnere
+# le prese del rig. L'account NON deve avere la 2FA attiva: l'API cloud non la
+# gestisce. Conviene creare un account Kasa dedicato e condividergli la presa.
+#
+# NON COMMITTARE QUESTO FILE DOPO AVERLO COMPILATO:
+#     git update-index --skip-worktree kasa.txt
+#
+# chmod 600 kasa.txt
+username=
+password=

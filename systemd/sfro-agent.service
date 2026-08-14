@@ -1,0 +1,14 @@
+[Unit]
+Description=SFRO observatory agent (un ciclo della macchina a stati)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sfro-agent
+ExecStart=/usr/bin/python3 /opt/sfro-agent/sfro_agent.py --config /opt/sfro-agent/config.yaml --once
+User=root
+# Per gli oneshot systemd DISABILITA il timeout di default: un ciclo appeso
+# (es. CIFS in D-state a VPN giu') bloccherebbe il timer PER SEMPRE.
+# 45 min = sync finale (cap 30 min) + teardown/flat con margine.
+TimeoutStartSec=45min
