@@ -32,8 +32,10 @@ trappole che ho trovato — e sono tante — possano risparmiare a qualcun altro
 le stesse serate perse.
 
 > **Se lo trovi utile**, la cosa che mi fa più piacere è che tu ti iscriva alla
-> newsletter: è lì che racconto come evolve, cosa si rompe e cosa imparo.
-> 👉 **[Iscriviti alla newsletter](<<<LINK_NEWSLETTER>>>)**
+> newsletter: è lì che racconto come evolve il progetto, cosa si rompe, cosa
+> imparo notte dopo notte — e le foto che ne escono.
+>
+> 👉 **[sideris.art/journal](https://sideris.art/journal/)**
 
 ---
 
@@ -278,5 +280,5 @@ tieni l'attribuzione e non chiedermi garanzie.
 
 <p align="center">
   <strong>Sideris Art</strong> · Fine Art Astrophotography<br>
-  <a href="<<<LINK_NEWSLETTER>>>">Iscriviti alla newsletter</a>
+  <a href="https://sideris.art/journal/">Journal &amp; newsletter</a>
 </p>
