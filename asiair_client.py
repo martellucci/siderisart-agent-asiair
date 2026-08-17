@@ -17,11 +17,23 @@ NON VERIFICATO (NON inventato qui):
   - I NOMI dei metodi (avvio autorun/plan ecc.) e il formato del campo esito.
     Vanno SCOPERTI sul firmware reale: vedi ASIAIR_TEST.md (cattura traffico app).
 
+HANDSHAKE DELLA 4700 (2026-08-16, punto 0.4 di MIGRAZIONE_V3.md):
+  Dal firmware ~43.97 — quello che l'app v3 impone — il canale 4700 e' CHIUSO:
+  finche' il client non si autentica il box risponde SOLO a `test_connection` e
+  `get_verify_str` e tutto il resto lo ignora IN SILENZIO, senza errore. Qui
+  l'autenticazione sta in connect(), cioe' nell'unico punto da cui passano tutti
+  i comandi di tutti i flussi (agente, bot, flat/dark, teardown, shutdown): si
+  scrive una volta e ogni chiamante la eredita.
+  Sul nostro 13.41 e' INERTE: `get_verify_str` risponde 103 e non si firma nulla.
+  Vedi ASIAIR_FINDINGS.md, "AGGIORNAMENTI 2026-08-12".
+
 Config: file asiair.txt nella stessa cartella (host/port). CLI sovrascrive.
-Dipendenze: solo stdlib.
+Dipendenze: stdlib; `cryptography` serve SOLO a firmare, cioe' solo su firmware
+v3 — se manca, sul 13.41 non se ne accorge nessuno.
 """
 
 import argparse
+import base64
 import json
 import os
 import socket
@@ -29,6 +41,30 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Chiave privata dell'app ASIAIR, estratta dall'APK v3 (MIGRAZIONE_V3.md 0.2).
+# Non e' un segreto NOSTRO (sta dentro l'app di chiunque), ma resta a 600 e fuori
+# dall'archivio codice dei backup come ogni file di chiave.
+KEY_FILE = os.path.join(HERE, "asiair_key.pem")
+
+# Esito dell'handshake gia' scoperto, per (host, porta), valido per il processo.
+# Serve perche' l'agente apre una connessione FRESCA per ogni comando (_call1):
+# senza memoria pagherebbe una sonda in piu' a ogni comando, sulla VPN, anche
+# sul firmware vecchio dove non serve a niente. Si memorizza solo "legacy": su
+# v3 lo sblocco e' per-connessione e la firma va rifatta ogni volta.
+_VERIFY_MODE: dict = {}
+
+
+def _sign_challenge(challenge: str, key_file: str = KEY_FILE) -> str:
+    """Firma la sfida come fa l'app: RSA PKCS#1 v1.5 su SHA-1, in base64.
+    Import locale: sul firmware vecchio non si arriva mai qui e `cryptography`
+    non deve essere un requisito per far girare l'agente."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    with open(key_file, "rb") as fh:
+        key = serialization.load_pem_private_key(fh.read(), password=None)
+    return base64.b64encode(
+        key.sign(challenge.encode(), padding.PKCS1v15(), hashes.SHA1())).decode()
 
 
 def load_conf(path: str) -> dict:
@@ -46,15 +82,68 @@ def load_conf(path: str) -> dict:
 
 
 class AsiairClient:
-    def __init__(self, ip: str, port: int = 4400, timeout: float = 8.0):
+    def __init__(self, ip: str, port: int = 4400, timeout: float = 8.0,
+                 key_file: str = KEY_FILE):
         self.ip, self.port, self.timeout = ip, port, timeout
         self.sock: socket.socket | None = None
         self._buf = b""
         self._id = 0
+        self.key_file = key_file
+        self.verified = False        # True solo se ABBIAMO davvero firmato
 
     def connect(self):
         self.sock = socket.create_connection((self.ip, self.port), self.timeout)
         self.sock.settimeout(self.timeout)
+        self._verify()
+
+    def _verify(self):
+        """Autentica il canale se il firmware lo richiede. Inerte sul 13.41.
+
+        La sonda e' `get_verify_str` e NON `pi_is_verified` (che il piano 0.4
+        ipotizzava): prima dell'autenticazione la v3 risponde solo a
+        test_connection e get_verify_str, quindi pi_is_verified degenererebbe
+        proprio nel timeout che vogliamo evitare. get_verify_str invece risponde
+        SEMPRE — con la sfida sul firmware nuovo, con 103 sul nostro (verificato
+        live il 2026-08-12). E' la stessa regola "solo il 103 autorizza il
+        fallback legacy" del flusso v3 di terzi visto sul forum SFRO.
+
+        Un guasto della SONDA (box muto o lento) NON e' un errore: si prosegue
+        come si e' sempre fatto e non si memorizza nulla, cosi' il tentativo si
+        ripete alla prossima connessione. Se invece la sfida ARRIVA — e allora
+        il box e' certamente v3 e senza firma ignorerebbe ogni comando — un
+        fallimento diventa un errore ESPLICITO: mai un timeout muto."""
+        if _VERIFY_MODE.get((self.ip, self.port)) == "legacy":
+            return
+        budget = min(self.timeout, 5.0)
+        try:
+            r, _ = self.call("get_verify_str", [], max_wait=budget)
+        except (TimeoutError, ConnectionError, OSError, ValueError):
+            return
+        res = r.get("result")
+        challenge = res.get("str") if isinstance(res, dict) else (
+            res if isinstance(res, str) else None)
+        if not challenge:                    # code 103: firmware senza handshake
+            _VERIFY_MODE[(self.ip, self.port)] = "legacy"
+            return
+        _VERIFY_MODE[(self.ip, self.port)] = "v3"
+        try:
+            firma = _sign_challenge(challenge, self.key_file)
+        except Exception as e:               # chiave assente/illeggibile, o niente cryptography
+            raise ConnectionError(
+                f"canale {self.port} non autenticabile: {e}") from e
+        try:
+            self.call("verify_client", [firma, challenge], max_wait=budget)
+        except TimeoutError:
+            pass          # la v3 non sempre risponde: la prova vera e' la riverifica
+        try:
+            pv, _ = self.call("pi_is_verified", [], max_wait=budget)
+        except TimeoutError as e:
+            raise ConnectionError(
+                f"canale {self.port} NON autenticato: il box resta muto") from e
+        if pv.get("result") not in (True, 1):
+            raise ConnectionError(
+                f"canale {self.port} NON autenticato: firma rifiutata")
+        self.verified = True
 
     def close(self):
         if self.sock:

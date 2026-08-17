@@ -249,6 +249,12 @@ oppure "≥1 frame completato" (`frame_summary.complete_num`).
 La scrittura di `exp` via `set_sequence`
 (slot completo) è validata live: è il meccanismo con cui i dark flat
 ricevono il tempo del flat corrispondente.
+⚠️ **Il tempo del dark flat va scritto al CENTESIMO** (2026-08-15): il valore
+AUTO letto dallo slot va usato con 2 decimali (flat 5.74 → dark 5.74). Con
+l'arrotondamento a 1 decimale in vigore dal 2026-07-27 il dark usciva a 5.70 s
+e **PixInsight non riconosceva la coppia** flat/dark flat. Il confronto in
+rilettura resta tollerante (`EXP_TOL` 2 ms): copre l'artefatto float del
+firmware (1e-6) e rileva comunque uno scarto di un centesimo.
 ⚠️ **Tetto del calcolo AUTO ≈ 15 s** (osservato live): il 2026-07-25 i flat
 R/G/B a **gain 0, pannello 50%** sono usciti tutti a **15.0 s esatti**
 (clamp al massimo); il 2026-07-26, stesse condizioni, il calcolo su B è
@@ -270,6 +276,18 @@ valore nella mappa (è per-filtro).
 usa con 0. `AsiairControl.ensure_anti_dew()` legge, accende solo se spento e
 verifica con rilettura; chiamato nel pre-avvio di `start()` (il 19/7 l'utente
 l'ha trovato spento: ~10 pose rovinate dall'umidità del mattino).
+
+### Piano ESAURITO vs piano INTERROTTO (`get_plan`, 2026-08-15)
+`get_plan` dà per ogni target `enable`, `total_time_sec`, `left_time_sec` e i
+`seqs` con `lapsed`. Il **residuo** è la somma di `left_time_sec` sui target
+**abilitati**: a zero il piano ha fatto tutte le pose previste, ed è una fine
+normale. Serve perché `capture.is_working` e `is_plan_started` non lo dicono —
+il secondo resta `true` anche a piano fermo (vedi sopra). `AsiairControl.plan_left()`
+lo usa per scegliere fra il messaggio 🏁 di fine piano e l'avviso ⚠️ di piano
+interrotto: fino al 2026-08-15 arrivava sempre l'avviso di errore, anche a pose
+esaurite (segnalato dall'utente). I target **disabilitati** vanno esclusi:
+altrimenti un target spento con ore di residuo farebbe sembrare interrotto un
+piano concluso.
 
 ### Reset del PIANO (candidato, NON ancora catturato dall'app)
 Un piano interrotto NON riparte con `start_exposure` finché non viene
@@ -328,6 +346,17 @@ vecchio (l'evento `Version` conferma **13.41**, svr_ver_int 29).
 telemetria, proprio i comandi. Non aggiornare senza aver prima implementato
 l'handshake.
 
+**HANDSHAKE SCRITTO E IN PRODUZIONE 2026-08-16** (`asiair_client.py`, punto 0.4
+di MIGRAZIONE_V3.md; verificato dal vivo su entrambi i box: `103`, nessuna
+firma, modo `legacy`). Sta in `connect()`, quindi copre da
+solo ogni comando di ogni flusso — agente, bot, flat/dark, teardown, shutdown.
+Sul 13.41 e' inerte. Nota per chi lo rileggera': la sonda e' `get_verify_str` e
+non `pi_is_verified`, perche' prima dell'autenticazione la v3 droppa tutto
+tranne `test_connection` e `get_verify_str` (vedi sopra) — sondare con
+`pi_is_verified` significherebbe aspettare un timeout a ogni connessione.
+Conferma indipendente arrivata dal forum SFRO (16/8): un utente su firmware v3
+descrive la stessa sequenza e lo stesso fallback "solo il 103 e' legacy".
+
 ### Porta 4800 — come sono fatti i dati delle immagini
 Decodificata da tankhardrive (noi non ne abbiamo bisogno, le immagini arrivano
 via rsync/SMB, ma il reverse engineering e' fatto): connessione TCP a parte,
@@ -369,6 +398,154 @@ la nostra**: loro fw 43.97, noi 13.41 — la doc si legge, il codice non si copi
 Dice se un'uscita **sta davvero assorbendo** (es. la fascia anticondensa), cosa
 che `pi_output_get2` da solo non distingue. `get_disk_volume` → `{totalMB,
 freeMB}` (121926/111125 MB).
+
+## AGGIORNAMENTI 2026-08-16 — cold start provato DAVVERO (box di CASA)
+
+Il rig di casa (ASI2600MC + ASI220MM + montatura **simulata**) e' stato messo a
+disposizione per provare la sequenza a freddo senza rischi: presa spenta e
+riaccesa, e l'utente che **non entra mai nell'app**. Vedi POSTAZIONE_HOME.md.
+
+### La ricetta a freddo REGGE: 11 s per i device, 260 s per il freddo
+Stato al primo contatto (la prova che erano davvero giu'): camera
+`{"state":"close"}` e canale **4400 completamente vuoto** (`{}`). Poi, tutto da
+codice: priming per canale → `open_camera[0]` (camera `idle` dopo **1 s**) →
+`set_camera_idx[1]`+`set_connected{camera}` → `select_mount_list_index`+
+`set_connected{mount}` → `scope_set_time` code 0. **Undici secondi in totale.**
+Raffreddamento 26,7 → 0,8 °C (target 0) in **260 s**, ripetibile: stesso tempo
+in due prove distinte, discesa lineare, nessun plateau.
+
+### ⚠️ `is_plan_started` puo' essere true PRIMA di qualunque avvio
+Sul box di casa era **gia' `true`** a piano fermo e mai avviato in quella
+sessione: e' lo stesso flag sticky che il 2026-07-09 mascherò un piano fermo per
+un'intera notte. **Non e' una prova d'avvio.** La prova vera e' il **tempo
+residuo del piano che CALA** (`get_plan` → `left_time_sec` < `total_time_sec`),
+in subordine `get_app_state` → `capture.is_working` + `solve.is_working`.
+
+### Il piano RITENTA da solo il plate solve
+Al chiuso il solver non puo' convergere (niente stelle), e si vede il ciclo per
+intero: `solve.lapse_ms` che sale fino a **~121 s**, `is_working` che torna
+false, e subito **un nuovo tentativo che riparte da zero** con una nuova
+esposizione. Il residuo del piano resta invariato: **nessuna posa viene
+accreditata finche' il puntamento non e' risolto**. Curiosita' utile a
+interpretare i log: il solver riporta comunque `star_number` 200-240 su rumore e
+riflessi — `star_number` alto **non** significa che stia risolvendo.
+
+### `connect_all` e' tarato su SFRO e NON gira sul rig di casa
+Due dipendenze implicite emerse solo qui:
+1. **pretende EAF e ruota**: a casa non ci sono (`get_focuser_info` /
+   `get_wheel_state` → `{"state":"close"}`) e `connect_all` fallirebbe;
+2. **riconosce le camere per pezzo di nome** — `"2600"` per la principale e
+   `"120"` per la guida: la **ASI220MM Mini non contiene "120"**, il match manca
+   e ripiega sull'indice 1 di default.
+Nel test entrambe aggirate scegliendo gli **id espliciti** dall'enumerazione.
+Se un giorno la stessa funzione dovra' servire le due postazioni, va resa
+capace di device **opzionali** e di scelta per id.
+
+### Mount simulato: `get_mount_list` indice 16 = "Demo Interface"
+`get_connected [true]` → `{"camera": {...}, "mount": 16, "mount_name":
+"Demo Interface"}`. ⚠️ Nota che **`mount` e' l'INDICE nella lista, non un
+booleano** (a SFRO l'AM5N e' l'indice 1, che essendo truthy ha sempre funzionato
+come se lo fosse): `bool(res.get("mount"))` darebbe **falso negativo**
+sull'indice 0, che nella lista e' "On-Camera-ST4".
+`get_connected_mount_info` → **210 "not supported"** sul mount simulato.
+
+## AGGIORNAMENTI 2026-08-17 — GOTO RIFIUTATI A FREDDO: due cause, risolte live
+
+Prima notte di cold start davvero automatico (T-10, senza che l'utente aprisse
+mai l'app) e **il piano non ha prodotto un solo frame**: 3162 goto rifiutati in
+2h15m. Diagnosi e fix fatti sul rig di produzione la notte stessa, con due
+partenze a freddo di verifica. E' l'incidente piu' istruttivo del progetto:
+l'agente funzionava da luglio **solo perche' l'utente apriva sempre l'app**.
+
+### Il sintomo e l'errore VERO
+Nel log autorun si legge soltanto `[AutoCenter|End] Mount slews failed`, ripetuto
+ogni ~2,5s. A protocollo l'errore e' molto piu' parlante — si vede solo
+ascoltando gli **eventi** sul socket, non nella reply della chiamata:
+
+    {"Event":"ScopeGoto","state":"fail","error":"internal error",
+     "code":300,"lapse_ms":41,"route":[]}
+
+`scope_goto` risponde **code 0** (comando accettato) e il mount **non si muove**.
+Il fallimento arriva in ~41ms sul 4400 e in ~13ms sul 4700 (`Event AutoGoto`, la
+strada che percorre l'AutoCenter del piano). La chiave e' **`route: []`**: il
+route planner non riesce a calcolare il percorso.
+
+### CAUSA 1 — l'orologio del Pi riparte dal 2019 a OGNI accensione
+L'ASIAIR **non ha RTC e non conserva l'ora**: si sveglia sempre a
+**2019-02-14 11:12**, sia da power-cycle KASA sia dopo `pi_reboot` (verificato
+tre volte il 17/8). Senza internet al sito (quella notte anche l'rsync ando' in
+timeout a 1024s) ci resta. Con la data sbagliata di sette anni l'ora siderale e'
+insensata e il mount rifiuta.
+
+- Il clock del PI si imposta con **`pi_set_time`** (4700), params
+  `[{year,mon,day,hour,min,sec,time_zone}]` → code 0. Si RILEGGE con
+  **`pi_get_time`** → `{'year':2026,...,'time_zone':'Europe/Rome'}`.
+- ⚠️ **`scope_set_time` (4400) NON c'entra**: quello e' l'orologio del MOUNT, che
+  e' un'altra cosa e che l'agente gia' impostava.
+- ⚠️ Va fatto **PRIMA di connettere i device**: correggerlo dopo non sana il
+  processo gia' avviato. Il 17/8 l'app sistemo' l'ora alle 06:33 e i goto
+  fallivano ancora — servi' il reboot dell'ASIAIR.
+
+### CAUSA 2 — `scope_set_location` al connect (la causa principale)
+Senza posizione il planner non calcola la rotta e restituisce `route: []`. Il
+paradosso: la location **PERSISTE nel mount** e `scope_get_info` la rilegge
+corretta — ma non basta, va **(ri)scritta nella sessione dopo ogni connect**.
+
+Prova a variabile singola (17/8, live): tre goto falliti a 41ms → una sola
+`scope_set_location [0.0, 0.0]` → il goto successivo slewa e
+**completa in 583ms**. Nessun'altra variabile toccata.
+
+**L'app manda ora E posizione a ogni connect.** Per questo il rig funzionava
+solo con l'app aperta, e per questo il guasto e' esploso alla prima notte
+davvero autonoma.
+
+### La ricetta corretta (ora in `connect_all`)
+1. servizi su (`test_connection` sui due canali)
+2. **`pi_clock_sync`** — `pi_get_time`, se lo scarto supera 120s `pi_set_time` e
+   RILETTURA di conferma. Senza ora buona non si connette nulla
+3. device col priming (invariato)
+4. `scope_set_time` **verificato** con `scope_get_time` (prima era
+   fire-and-forget: un fallimento silenzioso costava la notte)
+5. gate posizione **in LETTURA**, poi `scope_set_location`. L'ordine e' voluto:
+   un mount fuori tolleranza non va "corretto" scrivendoci sopra, sarebbe la
+   fine del gate
+
+### Verifica finale (cold start pulito, 2026-08-17)
+Da tutto spento, senza reboot e senza toccare l'orologio a mano: ping 35s →
+`connect_all` 28s (*"orologio Pi CORRETTO (leggeva 2019-02-14 11:12)"*) → mount
+su **RA 23.3669 / Dec 61.3294** contro 23.3672 / 61.3292 di NGC 7635.
+**86 secondi dal buio totale al mount sul bersaglio**, poi 6 iterazioni di
+plate solve, `guide_settling` e piano in ripresa.
+
+### Metodi nuovi (probe 2026-08-17, oracolo 103)
+| Metodo | Canale | Note |
+|---|---|---|
+| `pi_get_time` / `pi_set_time` | 4700 | orologio del Pi; `pi_set_time` params in LISTA |
+| `scope_get_time` | 4400 | rilettura ora mount → `["2026-8-17T5:51:47","1"]`, elem. 0 in UTC |
+| `get_user_location` | **4400** | ritorna `[lon, lat]`. Sul 4700 **non esiste** |
+| `scope_set_track_state [bool]` / `scope_get_track_state` | 4400 | tracking on/off |
+| `pi_reboot` | 4700 | riavvio; ⚠️ l'ora torna al 2019 |
+| `scope_abort_slew`, `scope_move`, `scope_sync` | 4400 | esistono (209/108 con param finti) |
+
+**NON esistono** (103): `scope_unpark`, `scope_home`/`scope_go_home`/
+`scope_search_home`, `scope_set_park_type`, `set_user_location` sul 4700,
+`scope_get_utc_time`. L'unico comando di parcheggio e' `scope_park` — ⚠️ con
+params qualsiasi **esegue** (code 0), non e' sondabile a vuoto.
+
+### Cosa NON era la causa (escluso per esperimento)
+Mount parcheggiato (`scope_park` ripetuto: nessun effetto), tracking spento
+(acceso: nessun effetto), `time_offset` `"-0"` vs `"1"` (provati entrambi),
+bersaglio specifico (fallivano anche coord diverse), `is_home_succeed:false`
+(resta false anche a goto funzionante). Il link seriale era sano per tutta la
+durata del guasto: il mount rispondeva a tracking e park e i dati erano live.
+
+### Watchdog di stallo (aggiunto lo stesso giorno)
+`is_plan_started` e `capture.is_working` erano **entrambi true** mentre il mount
+rifiutava 3162 goto: nessun allarme per 2h15m. Il progresso VERO e' il residuo
+del piano (`get_plan`, lo stesso che distingue 🏁 da ⚠️). Se non scende per
+`asiair.plan_stall_minutes` (default 20, `first_delay` escluso) → 🛑 su
+Telegram, ripetuto col cooldown degli alert. **Solo avviso**: l'agente non
+tocca mai una ripresa in corso.
 
 ## Script
 - `asiair_status.py` — snapshot stato su 4700 (read-only).

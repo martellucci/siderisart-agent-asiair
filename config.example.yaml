@@ -49,6 +49,7 @@ kasa:
   outlets: ["Asiair", "Mount"]   # prese da accendere all'apertura del tetto
   auto_power_on: true            # accensione automatica all'apertura del tetto
   terminal_uuid: ""
+  token_ttl_hours: 12            # durata della cache del token (vedi sotto)
 
 # Notte Nautica: l'agente opera SOLO sotto i -12° del sole (calcolata dalle coord).
 nautical: {depression: 12}
@@ -72,6 +73,12 @@ asiair:
   vpn_probe_host: "198.51.100.1"   # <<< IP del router remoto (sonda VPN)
   # I 5 device che DEVONO risultare connessi (collegati dall'utente via app).
   required_devices: ["camera", "focuser", "wheel", "mount", "guide"]
+  # WATCHDOG STALLO (2026-08-17): piano "avviato" ma residuo (get_plan)
+  # invariato da N minuti -> allarme Telegram ripetuto (solo avviso, l'agente
+  # non tocca la ripresa). La notte del 17/8 il mount ha rifiutato 3162 goto
+  # per 2h15m senza che nessuno se ne accorgesse. Soglia sopra posa massima +
+  # flip/autofocus (300s + ~10'); 0 = disattivato. first_delay escluso.
+  plan_stall_minutes: 20
   # Flat panel OF2 (uscita 'flat_panel'). Aperto (state=false) come ULTIMO passo prima
   # dell'avvio (poi attende il motore); chiuso (state=true) nel teardown.
   flat_panel:
@@ -122,8 +129,17 @@ asiair:
 # e (gate posizione + OF2) avvia SOLO il piano. connect_all/scope_set_time
 # dell'agente non vengono piu' usati finche' enabled resta false.
 startup:
-  enabled: false
-  lead_minutes: 5
+  # RIATTIVATO 2026-08-16 su richiesta dell'utente, dopo il test di cold start
+  # riuscito sul box di casa (device connessi da chiusi in 11s, camera in
+  # temperatura in 260s, piano accettato). Era false dal 2026-07-09, revert
+  # prudenziale dopo il guasto al mount dell'8-9/7 — indagine che aveva comunque
+  # SCAGIONATO l'avvio automatico (il degrado inizio' a meta' sessione).
+  enabled: true
+  # 10 e non piu' 5 (specifica utente 2026-08-16): a T-10 si accende e si
+  # INIZIALIZZA soltanto — connessione device, anti-dew, fascia, cooler — e i
+  # dieci minuti servono a portare la camera in temperatura. Il PIANO parte
+  # all'inizio della notte nautica, dal ramo di notte, non qui.
+  lead_minutes: 10
   ping_timeout_seconds: 240
 
 flat_flow:
@@ -248,6 +264,10 @@ manual_shutdown_file: /var/lib/sfro-agent/manual_shutdown.json
 # a fine flusso l'agente chiede lo spegnimento e il bot scrive la risposta.
 manual_flat_request_file: /var/lib/sfro-agent/flat_request.json
 manual_flat_reply_file: /var/lib/sfro-agent/flat_reply.json
+# Stop dell'ATTESA flat dal menu (2026-08-15): durante i 30' di asciugatura il
+# bot scrive qui la richiesta di interruzione, l'agente annulla il flusso e
+# lascia il rig com'e' (il promemoria di spegnimento riprende).
+flat_cancel_request_file: /var/lib/sfro-agent/flat_cancel.json
 # Cooldown per NON ripetere lo stesso avviso d'errore ad ogni ciclo (min).
 alert_cooldown_minutes: 30
 
@@ -268,8 +288,17 @@ sync_module:
   rsync_exclude: ["*.jpg"]
   rsync_extra: []
   per_run_cap_minutes: 30
+  # Cadenza della passata PERIODICA durante la ripresa (2026-08-15): il costo
+  # di un rsync e' quasi tutto scansione dell'albero CIFS via VPN ed e'
+  # costante, quindi non ha senso legarlo al ciclo dell'agente (ora 3 min).
+  # Le passate FISSE — fine piano, flat, teardown, bottone Rsync del bot —
+  # ignorano questa cadenza e girano comunque.
+  sync_interval_minutes: 15
 
 http: {timeout_seconds: 15, retries: 2, retry_backoff_seconds: 3}
 state_file: /var/lib/sfro-agent/state.json
+# Cache del token del cloud Kasa (2026-08-15): senza, ogni ciclo faceva un
+# login completo a TP-Link (~480 al giorno con l'agente a 3 minuti). E' un
+# segreto: file a permessi 600, FUORI dai backup — si rigenera da kasa.txt.
+kasa_token_file: /var/lib/sfro-agent/kasa_token.json
 log_level: INFO
-loop_interval_seconds: 300   # loop ogni 5 min durante la notte nautica

@@ -78,6 +78,11 @@ A.AsiairControl.ensure_anti_dew = (
     lambda self: (PREP.append("antidew"), KB["antidew"])[1])
 A.AsiairControl.set_output = (
     lambda self, t, v: (PREP.append(f"set_output({t},{v})"), KB["heater"])[1])
+# COOLER nel pre-avvio dal 2026-08-16 (specifica utente): il piano non deve mai
+# partire con la camera calda, nemmeno se l'inizializzazione al T-10 e' saltata.
+A.AsiairControl.cooler_on = (
+    lambda self: (PREP.append("cooler_on"), KB["cooler"])[1])
+A.AsiairControl.camera_cooling = lambda self: (True, 21.4, 0.0, True, "")
 
 START_SCRIPT = {"set_page": {"code": 0},
                 "start_exposure": {"code": 0},
@@ -85,19 +90,21 @@ START_SCRIPT = {"set_page": {"code": 0},
                                      "result": [{"is_plan_started": True}]}}
 
 # 1) tutto ok: detail = esiti pre-avvio
-KB = {"antidew": (True, "gia' acceso"), "heater": (True, "")}
+KB = {"antidew": (True, "gia' acceso"), "heater": (True, ""), "cooler": (True, "")}
 PREP.clear()
 fc = with_client(dict(START_SCRIPT))
 ok, det = ac.start(snap_ok)
 assert ok, det
-assert det == "anti-dew camera ON (gia' acceso) · fascia anticondensa al 100%", det
-assert PREP == ["antidew", "set_output(dew_heater,100)"], PREP
+assert det == ("anti-dew camera ON (gia' acceso) · fascia anticondensa al 100% · "
+               "cooler ON (21.4°C → target 0.0°C)"), det
+assert PREP == ["antidew", "set_output(dew_heater,100)", "cooler_on"], PREP
 i_start = [m for m, _ in fc.calls].index("start_exposure")
 assert ("start_exposure", ["light"]) in fc.calls, fc.calls
 print("start ok:", det)
 
 # 2) pre-avvio in errore: il piano parte COMUNQUE, detail con i warning
-KB = {"antidew": (False, "timeout"), "heater": (False, "boh")}
+KB = {"antidew": (False, "timeout"), "heater": (False, "boh"),
+      "cooler": (False, "code 107")}
 PREP.clear()
 fc = with_client(dict(START_SCRIPT))
 ok, det = ac.start(snap_ok)
@@ -105,6 +112,7 @@ assert ok, det
 assert "⚠️ anti-dew camera NON verificato (timeout)" in det, det
 assert "accendilo dall'app" in det, det
 assert "⚠️ fascia anticondensa NON impostata (boh)" in det, det
+assert "⚠️ cooler NON acceso (code 107)" in det, det
 assert ("start_exposure", ["light"]) in fc.calls, "il piano deve partire comunque"
 print("start con warning:", det)
 

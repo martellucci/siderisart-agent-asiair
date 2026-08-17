@@ -170,6 +170,13 @@ A mount without power **loses its clock**: after connecting, send
 other forms return 105). Location, by contrast, persists (`scope_get_info` uses
 capitalised keys `Lat`/`Lon`).
 
+> ⚠️ **Persisting is not the same as being usable.** The location survives in the
+> mount, but you must still send `scope_set_location` after every connect or
+> **every goto is refused**. Likewise, setting the mount's clock is not enough:
+> the Pi has its own clock, and it starts at 2019. Both are covered in
+> [Updates 2026-08-17](#updates-2026-08-17--every-goto-refused-on-a-cold-start),
+> which is the single most expensive lesson in this document.
+
 ### Plan/autorun start and page context
 
 `start_exposure ["light"]` acts on the **current page context**:
@@ -453,6 +460,108 @@ for instance), which `pi_output_get2` alone cannot distinguish.
 `get_disk_volume` → `{totalMB, freeMB}`.
 
 ---
+
+## Updates 2026-08-17 — every goto refused on a cold start
+
+The first night the agent ran a genuinely unattended cold start, the plan
+produced **not a single frame**: 3162 goto attempts refused over 2h15m. Both
+causes were found and fixed live the same night, with two cold-start
+verifications. If you are automating an ASIAIR without the app, this section is
+probably the reason you are reading this document.
+
+### The symptom, and the error you actually want
+
+The autorun log only ever says `[AutoCenter|End] Mount slews failed`, repeated
+every ~2.5 s. On the wire the error is far more useful — but it arrives as an
+**event**, not as the reply to the call, so a client that only reads replies
+never sees it:
+
+```json
+{"Event":"ScopeGoto","state":"fail","error":"internal error",
+ "code":300,"lapse_ms":41,"route":[]}
+```
+
+`scope_goto` returns **code 0** — the command is accepted — and the mount does
+not move. The failure lands in ~41 ms on 4400, and in ~13 ms on 4700
+(`Event AutoGoto`, the path the plan's AutoCenter takes). The tell is
+**`route: []`**: the route planner could not compute a path.
+
+### Cause 1 — the Pi's clock restarts at 2019 on every boot
+
+The ASIAIR has **no RTC and does not persist the time**. It wakes up at
+**2019-02-14 11:12** every single time, from mains power and after `pi_reboot`
+alike. With no internet at the site it stays there, and a date seven years off
+makes sidereal time meaningless, so the mount refuses to slew.
+
+- Set it with **`pi_set_time`** (4700), params
+  `[{year, mon, day, hour, min, sec, time_zone}]` → code 0. Read it back with
+  **`pi_get_time`**.
+- ⚠️ `scope_set_time` on 4400 is a **different clock** — the mount's. Setting one
+  does nothing for the other.
+- ⚠️ Do it **before connecting any device**. Fixing the clock afterwards does not
+  heal an already-running process: in our incident the app corrected the time and
+  goto still failed, and only a reboot cleared it.
+
+### Cause 2 — `scope_set_location` after every connect
+
+Without a location the planner cannot build a route and returns `route: []`.
+The trap is that the location **persists in the mount** and `scope_get_info`
+reads it back correctly — so everything looks fine. It still has to be written
+into the session after each connect.
+
+Single-variable proof: three goto attempts failing at 41 ms → one
+`scope_set_location [lat, lon]` → the next goto slews and **completes in 583 ms**.
+Nothing else changed.
+
+**The app sends both time and location on every connect.** That is why a rig can
+work for months and then fail the first night nobody opens the app.
+
+### The order that works
+
+1. services up (`test_connection` on both channels)
+2. **Pi clock**: `pi_get_time`, correct with `pi_set_time` if it is off, read back
+   to confirm. Do not connect anything until this is right
+3. devices, with the camera priming described above
+4. `scope_set_time`, **verified** with `scope_get_time` — do not fire and forget
+5. read the position (this is also your "is the rig where I think it is?" check),
+   then `scope_set_location`
+
+Verified from a cold start with no reboot and no manual intervention: 35 s to
+ping, 28 s for the full connect, and the mount on target 86 s after power-on.
+
+### Methods worth knowing
+
+| Method | Channel | Notes |
+|---|---|---|
+| `pi_get_time` / `pi_set_time` | 4700 | the Pi's clock; `pi_set_time` takes its object **in a list** |
+| `scope_get_time` | 4400 | reads the mount clock back → `["2026-8-17T5:51:47","1"]`, element 0 is UTC |
+| `get_user_location` | **4400** | returns `[lon, lat]`. Does **not** exist on 4700 |
+| `scope_set_track_state [bool]` / `scope_get_track_state` | 4400 | tracking on/off |
+| `pi_reboot` | 4700 | reboots; ⚠️ the clock goes back to 2019 |
+
+**Do not exist** (code 103): `scope_unpark`, `scope_home` / `scope_go_home` /
+`scope_search_home`, `scope_set_park_type`, `set_user_location` on 4700,
+`scope_get_utc_time`. The only parking command is `scope_park` — and ⚠️ it
+**executes with any parameters**, so you cannot probe it harmlessly.
+
+### What it was not
+
+Ruled out by experiment, in case you go down the same paths: mount parked
+(repeated `scope_park`: no effect), tracking disabled (enabling it: no effect),
+the `time_offset` field (`"-0"` and `"1"` both tried), a specific target
+(different coordinates failed identically), and `is_home_succeed: false` (still
+false once goto works). The serial link was healthy throughout — the mount
+answered tracking and park commands and reported live data the entire time.
+
+### A watchdog is worth more than it looks
+
+During the failure both `is_plan_started` and `capture.is_working` were **true**:
+by every flag the ASIAIR exposes, the plan was running. Nothing was wrong,
+except that no photons were being collected. The only honest measure of progress
+is the plan's **remaining time** from `get_plan`: if it stops decreasing for
+longer than one exposure plus meridian flip and autofocus, something is stuck.
+Alert, do not intervene — an imaging run in progress should never be touched by
+automation.
 
 ## A note on the probe scripts
 

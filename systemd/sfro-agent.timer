@@ -1,9 +1,13 @@
 [Unit]
-Description=Esegue l'agente SFRO ogni 5 minuti (allineato al clock)
+Description=Esegue l'agente SFRO ogni 3 minuti (allineato al clock)
 
 [Timer]
-# Fire ai minuti :00,:05,:10,... per timing prevedibile su inizio/fine notte nautica.
-OnCalendar=*:0/5
+# Fire ai minuti :00,:03,:06,... per timing prevedibile su inizio/fine notte
+# nautica (3 divide 60: 20 scatti l'ora, sempre alle stesse posizioni).
+# Da 5 a 3 minuti il 2026-08-15, insieme allo scarico del ciclo: il sync
+# incrementale e il push su Sheets hanno ora una cadenza propria, quindi un
+# ciclo costa ~2 s anche in ripresa (prima 30 s di mediana).
+OnCalendar=*:0/3
 AccuracySec=20s
 Persistent=true
 

@@ -651,11 +651,35 @@ def build_report(cfg: dict) -> dict:
         return {"error": str(e)}
 
 
+def pending_push(cfg: dict) -> int:
+    """Frame ancora da riversare (pushed=0). Se ne restano, il push va rifatto
+    anche senza frame nuovi: e' il caso del NAS non montato al giro prima, in
+    cui i CSV non vengono scritti e le righe restano indietro apposta."""
+    db = open_db(sl_cfg(cfg)["db_file"])
+    try:
+        return int(db.execute("SELECT COUNT(*) FROM frames WHERE pushed=0")
+                   .fetchone()[0])
+    finally:
+        db.close()
+
+
 def update_and_push(cfg: dict) -> dict:
-    """Ingest + push in un colpo (chiamata per-ciclo dall'agente)."""
+    """Ingest + push in un colpo (chiamata per-ciclo dall'agente).
+
+    Il push NON e' un'operazione leggera: si autentica su Google, RILEGGE per
+    intero tre tab, le cancella e le riscrive, piu' i CSV sul NAS. Fino al
+    2026-08-15 girava a ogni ciclo anche senza nulla di nuovo da scrivere —
+    ~9 chiamate API a vuoto per ciclo, oltre mille per notte — ed era una delle
+    due voci che rendevano il ciclo notturno lungo 30 s contro i 2 s di quello
+    diurno. Ora si spinge solo se c'e' davvero qualcosa: frame appena ingeriti
+    oppure righe rimaste indietro da un giro precedente."""
     r = ingest(cfg)
     if r.get("new"):
         log.info("sessionlog: %d nuovi frame (%s)", r["new"], ",".join(r["nights"]))
+    if not r.get("new") and not pending_push(cfg):
+        r["pushed"] = False       # niente di nuovo: il foglio e' gia' allineato
+        return r
+    r["pushed"] = True
     p = push(cfg)
     if p.get("error"):
         raise RuntimeError(p["error"])

@@ -69,6 +69,10 @@ log = logging.getLogger("sfro-agent")
 # successiva) la logica normale del ciclo NON deve girare: riaccenderebbe la
 # KASA appena spenta o riavvierebbe il piano. 'ask_shutdown' = flusso manuale
 # in attesa della risposta sullo spegnimento (2026-08-01).
+# 'cancelled' (stop dell'attesa dal menu, 2026-08-15) e 'error' NON sono qui di
+# proposito: il flusso e' finito e il promemoria "spegni tu" deve tornare a
+# uscire; restano pero' valori PIENI, cosi' i rami che all'alba rifarebbero
+# teardown+flat (pretendono "nessuna fase flat") non ripartono da soli.
 FLAT_STAGES_BUSY = ("drying", "running", "darks", "ask_shutdown", "done")
 
 
@@ -251,13 +255,64 @@ class Telegram:
 # Cloud TP-Link Kasa (lettura stato + accensione; mai spegnimento)
 # --------------------------------------------------------------------------- #
 class KasaCloud:
-    def __init__(self, cfg: dict, creds: dict, http_cfg: dict, terminal_uuid: str):
+    def __init__(self, cfg: dict, creds: dict, http_cfg: dict, terminal_uuid: str,
+                 token_file: str = ""):
         self.base = cfg.get("cloud_base", "https://wap.tplinkcloud.com").rstrip("/")
         self.username = creds.get("username", "")
         self.password = creds.get("password", "")
         self.timeout = http_cfg.get("timeout_seconds", 15)
         self.tu = terminal_uuid
         self.token = None
+        # CACHE DEL TOKEN (2026-08-15): fino a ieri ogni ciclo faceva un login
+        # completo al cloud TP-Link, e con l'agente passato a 3 minuti sarebbero
+        # ~480 autenticazioni al giorno — il tipo di traffico che i cloud
+        # consumer iniziano a limitare. Il token e' materiale di AUTENTICAZIONE:
+        # sta in un file dedicato a permessi 600, non nello stato, e NON va nei
+        # backup (si rigenera da solo da kasa.txt). Se il cloud lo rifiuta,
+        # _kasa_connect rifa' il login una volta sola.
+        self.token_file = Path(token_file) if token_file else None
+        self.token_ttl = float(cfg.get("token_ttl_hours", 12)) * 3600
+        self.token_cached = False    # il token in uso viene dalla cache?
+
+    def _token_read(self):
+        """Token dalla cache, o None se assente/scaduto/di un altro utente."""
+        if not self.token_file:
+            return None
+        try:
+            d = json.loads(self.token_file.read_text())
+            if d.get("user") != self.username:
+                return None          # credenziali cambiate: cache non valida
+            if time.time() - float(d.get("ts", 0)) >= self.token_ttl:
+                return None
+            return d.get("token") or None
+        except Exception:
+            return None              # cache illeggibile: si rifa' il login
+
+    def _token_write(self, token):
+        """Scrittura atomica a permessi 600 (mai un file di token leggibile a
+        tutti, nemmeno per l'istante fra creazione e chmod)."""
+        if not self.token_file:
+            return
+        tmp = self.token_file.with_suffix(".tmp")
+        try:
+            self.token_file.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                json.dump({"token": token, "user": self.username,
+                           "ts": time.time()}, fh)
+            os.replace(tmp, self.token_file)
+        except Exception as e:
+            log.debug("cache token Kasa non scritta: %s", e)   # best-effort
+
+    def token_forget(self):
+        """Butta il token in cache (rifiutato dal cloud): il login successivo
+        ne chiede uno nuovo."""
+        self.token, self.token_cached = None, False
+        if self.token_file:
+            try:
+                self.token_file.unlink(missing_ok=True)
+            except Exception as e:
+                log.debug("cache token Kasa non rimossa: %s", e)
 
     def _post(self, url, payload):
         r = requests.post(url, json=payload, timeout=self.timeout,
@@ -268,13 +323,21 @@ class KasaCloud:
             raise RuntimeError(f"Kasa error {d.get('error_code')}: {d.get('msg')}")
         return d["result"]
 
-    def login(self):
+    def login(self, force: bool = False):
+        """Token dalla cache se ancora buono, altrimenti login vero.
+        `force` salta la cache (la usa il retry dopo un token rifiutato)."""
         if not self.username or not self.password:
             raise RuntimeError("Credenziali Kasa mancanti (kasa.txt)")
+        if not force:
+            tok = self._token_read()
+            if tok:
+                self.token, self.token_cached = tok, True
+                return
         res = self._post(self.base + "/", {"method": "login", "params": {
             "appType": "Kasa_Android", "cloudUserName": self.username,
             "cloudPassword": self.password, "terminalUUID": self.tu}})
-        self.token = res["token"]
+        self.token, self.token_cached = res["token"], False
+        self._token_write(self.token)
 
     def list_devices(self):
         return self._post(f"{self.base}/?token={self.token}",
@@ -411,6 +474,7 @@ class AsiairControl:
                 cap = st.get("capture", {}) if isinstance(st, dict) else {}
                 info["reachable"] = True
                 info["capturing"] = bool(cap.get("is_working"))
+                info["capture_state"] = cap.get("state")  # es. first_delay/expose
                 cs, _ = c.call("get_camera_state", [], max_wait=self.timeout)
                 cstate = cs.get("result", {})
                 info["cam_open"] = (isinstance(cstate, dict)
@@ -579,19 +643,10 @@ class AsiairControl:
         okp, lat, lon, det = self.check_position()
         if not okp:
             return False, det
-        # PRE-AVVIO (richiesta utente 2026-07-19): anti-dew della camera acceso
-        # e fascia anticondensa (output 4, dew_heater) al 100%. Errori NON
-        # bloccanti (meglio riprendere che perdere la notte) ma riportati nel
-        # detail, che il chiamante accoda al messaggio Telegram di avvio.
-        prep = []
-        ok_a, det_a = self.ensure_anti_dew()
-        prep.append(f"anti-dew camera ON ({det_a})" if ok_a else
-                    f"⚠️ anti-dew camera NON verificato ({det_a}): accendilo dall'app")
-        ok_h, det_h = self.set_output("dew_heater", self.start_dew_heater_pct)
-        prep.append(f"fascia anticondensa al {self.start_dew_heater_pct}%"
-                    if ok_h else
-                    f"⚠️ fascia anticondensa NON impostata ({det_h})")
-        prep_txt = " · ".join(prep)
+        # PRE-AVVIO (2026-07-19; dal 2026-08-16 include il COOLER e sta in
+        # prepare(), condiviso con l'inizializzazione al T-lead). Errori NON
+        # bloccanti, riportati nel detail che il chiamante accoda al messaggio.
+        prep_txt = self.prepare()
         # avvio del piano sul canale imager (4700)
         with self._client() as c:
             # ULTIMO passo: apri il flat panel OF2 e attendi il motore prima di avviare
@@ -652,6 +707,37 @@ class AsiairControl:
                 dirty.append(f"{t.get('target_name')}: {lapsed} pose fatte, "
                              f"restano {left}/{tot}s")
         return dirty
+
+    def plan_left(self) -> tuple:
+        """Lavoro RESIDUO del PIANO (get_plan, canale 4700): (ok, left_sec, detail).
+        left_sec = somma di `left_time_sec` sui target ABILITATI; 0 = piano
+        ESAURITO, cioe' tutte le pose previste sono state fatte.
+        Serve a distinguere un piano CONCLUSO da uno interrotto per errore:
+        fino al 2026-08-15 il piano fermo a tetto aperto faceva scattare in
+        entrambi i casi l'avviso «FERMATO in modo non previsto» (segnalato
+        dall'utente: pose esaurite, avviso di errore alle 12:45).
+        ok=False se get_plan non e' leggibile o non ci sono target abilitati:
+        in quel caso il chiamante non puo' concludere nulla."""
+        if not self.available:
+            return False, None, "ASIAIR non configurato"
+        try:
+            with self._client() as c:
+                r, _ = c.call("get_plan", [], max_wait=self.timeout)
+                plans = r.get("result") or []
+                if r.get("code") != 0 or not plans:
+                    return False, None, (f"get_plan code {r.get('code')}"
+                                         + (" (nessun piano)" if not plans else ""))
+                targets = [t for t in plans[0].get("targets", [])
+                           if t.get("enable")]
+                if not targets:
+                    return False, None, "nessun target abilitato nel piano"
+                left = sum(max(0, int(t.get("left_time_sec") or 0))
+                           for t in targets)
+                fatti = [t for t in targets
+                         if int(t.get("left_time_sec") or 0) <= 0]
+                return True, left, f"{len(fatti)}/{len(targets)} target completati"
+        except Exception as e:
+            return False, None, str(e)
 
     def reset_plan(self) -> tuple:
         """RESET del progresso del PIANO a fine notte (richiesta utente
@@ -847,6 +933,36 @@ class AsiairControl:
         except Exception as e:
             return False, str(e)
 
+    def prepare(self) -> str:
+        """PRE-AVVIO del rig: anti-dew della camera, fascia anticondensa al
+        valore di partenza e COOLER acceso. Ritorna il testo da mostrare.
+
+        Sta in un metodo solo perche' dal 2026-08-16 serve in DUE punti: al
+        T-lead (inizializzazione, quando il piano non parte ancora) e dentro
+        start() (avvio del piano). Chiamarlo due volte non fa danno — i tre
+        passi rileggono e non ripetono cio' che e' gia' a posto — ed e' proprio
+        la ridondanza che vogliamo: se il T-lead salta (tetto aperto tardi,
+        KASA irraggiungibile), il piano non deve partire con la camera calda.
+
+        Gli errori NON bloccano: meglio riprendere con la fascia storta che
+        perdere la notte. Finiscono nel testo, che il chiamante mette su
+        Telegram."""
+        out = []
+        ok, det = self.ensure_anti_dew()
+        out.append(f"anti-dew camera ON ({det})" if ok else
+                   f"⚠️ anti-dew camera NON verificato ({det}): accendilo dall'app")
+        ok, det = self.set_output("dew_heater", self.start_dew_heater_pct)
+        out.append(f"fascia anticondensa al {self.start_dew_heater_pct}%" if ok else
+                   f"⚠️ fascia anticondensa NON impostata ({det})")
+        ok, det = self.cooler_on()
+        if ok:
+            okc, temp, target, _, _ = self.camera_cooling()
+            out.append(f"cooler ON ({temp}°C → target {target}°C)" if okc
+                       else "cooler ON")
+        else:
+            out.append(f"⚠️ cooler NON acceso ({det})")
+        return " · ".join(out)
+
     def set_camera_gain(self, gain) -> tuple:
         """Imposta il GAIN della camera principale (set_control_value ["Gain",N],
         canale 4700 — verificato live 2026-07-24 con readback 0<->100). Gli slot
@@ -979,6 +1095,63 @@ class AsiairControl:
         except Exception as e:
             return None, str(e)
 
+    def pi_clock_sync(self, tol_seconds: float = 120.0) -> tuple:
+        """OROLOGIO DEL PI (incidente 2026-08-17): l'ASIAIR non ha RTC e, senza
+        internet ne' app al boot, il clock di sistema resta al default del
+        firmware (2019-02-14) -> il driver mount nasce con l'ora sballata e
+        OGNI goto viene rifiutato ("Mount slews failed" x3162 la notte del
+        17/8). Correggere l'ora DOPO non basta (lo stato resta avvelenato,
+        serve il reboot): va sistemata PRIMA di connettere i device. Legge
+        pi_get_time; se fuori tolleranza imposta l'ora del server con
+        pi_set_time (come fa l'app a ogni connect) e RILEGGE per conferma.
+        Ritorna (ok, detail); ok=False = orologio sballato e non corretto."""
+        def _skew(r):
+            # scarto |ora Pi - ora server| in secondi, nella tz del Pi
+            if not isinstance(r, dict):
+                return None, None
+            tzname = r.get("time_zone") or "Europe/Rome"
+            try:
+                tz = ZoneInfo(tzname)
+            except Exception:
+                tz, tzname = ZoneInfo("Europe/Rome"), "Europe/Rome"
+            try:
+                pi_dt = datetime(int(r["year"]), int(r["mon"]), int(r["day"]),
+                                 int(r["hour"]), int(r["min"]), int(r["sec"]),
+                                 tzinfo=tz)
+            except Exception:
+                return None, tzname
+            return abs((datetime.now(tz) - pi_dt).total_seconds()), tzname
+
+        code, res = self._call1(self.port, "pi_get_time")
+        if code != 0:
+            # metodo assente/illeggibile: non blocco (non e' la prova che l'ora
+            # sia sbagliata), ma lo dico nel dettaglio
+            return True, f"orologio Pi non leggibile (pi_get_time code {code})"
+        skew, tzname = _skew(res)
+        if skew is not None and skew <= tol_seconds:
+            return True, f"orologio Pi ok (scarto {skew:.0f}s)"
+        was = ("{}-{:02d}-{:02d} {:02d}:{:02d}".format(
+                   res.get("year"), res.get("mon") or 0, res.get("day") or 0,
+                   res.get("hour") or 0, res.get("min") or 0)
+               if isinstance(res, dict) else "?")
+        # sballato (o campi illeggibili): imposto l'ora del server nella
+        # STESSA tz che il Pi dichiara (payload = stessa forma di pi_get_time)
+        nowl = datetime.now(ZoneInfo(tzname))
+        payload = {"year": nowl.year, "mon": nowl.month, "day": nowl.day,
+                   "hour": nowl.hour, "min": nowl.minute, "sec": nowl.second,
+                   "time_zone": tzname}
+        scode, _ = self._call1(self.port, "pi_set_time", [payload])
+        if scode != 0:
+            # forma alternativa: oggetto nudo (come pi_output_set2)
+            scode, _ = self._call1(self.port, "pi_set_time", payload)
+        code2, res2 = self._call1(self.port, "pi_get_time")
+        skew2, _ = _skew(res2) if code2 == 0 else (None, None)
+        if skew2 is not None and skew2 <= tol_seconds:
+            return True, f"orologio Pi CORRETTO (leggeva {was})"
+        return False, (f"orologio Pi SBALLATO e non correggibile: leggeva {was}, "
+                       f"pi_set_time code {scode}, scarto dopo il set "
+                       + ("n/d" if skew2 is None else f"{skew2:.0f}s"))
+
     def connect_all(self) -> tuple:
         """Connette TUTTI i device a freddo (ricetta VALIDATA live 2026-07-04:
         cold boot 5/5 in ~60s, camere in 2-5s come dall'app). INDISPENSABILE il
@@ -1036,6 +1209,13 @@ class AsiairControl:
                     if time.time() - t > _budget(120):
                         return False, f"servizio porta {port} non pronto"
                     time.sleep(3)
+            # 0.5) OROLOGIO DEL PI prima di TUTTO (2026-08-17): col clock al
+            # default il connect del mount nasce avvelenato e i goto vengono
+            # rifiutati per l'intera notte (nemmeno correggere l'ora dopo lo
+            # sana: serve il reboot). Senza ora buona NON si connette nulla.
+            ok_t, clock_det = self.pi_clock_sync()
+            if not ok_t:
+                return False, clock_det
             # 1) camera principale (4700, con priming)
             cams = _cams(self.port)
             if not cams:
@@ -1075,10 +1255,74 @@ class AsiairControl:
             if not _wait("mount", _mount_ok, _mount_issue, 90):
                 return False, "mount non connesso"
             # senza corrente il mount perde l'orologio (utc 2000-1-1); la
-            # location invece persiste. Formato scoperto 2026-07-04.
-            nowu = datetime.now(ZoneInfo("UTC"))
-            self._call1(self.guider_port, "scope_set_time",
-                        [nowu.strftime("%Y-%m-%dT%H:%M:%S"), "-0"])
+            # location invece persiste. Formato scoperto 2026-07-04. Dal
+            # 2026-08-17 l'esito e' VERIFICATO con scope_get_time (prima era
+            # fire-and-forget: un fallimento silenzioso = notte di goto
+            # rifiutati). Tolleranza LARGA (2h): deve acchiappare il reset a
+            # 2000-1-1, non fare il pignolo su offset/estate.
+            def _mount_clock_ok():
+                c2, r2 = self._call1(self.guider_port, "scope_get_time")
+                if c2 != 0 or not isinstance(r2, list) or not r2:
+                    return False
+                try:  # es. ["2026-8-17T5:51:47", "1"] — elemento 0 in UTC
+                    dt = datetime.strptime(str(r2[0]), "%Y-%m-%dT%H:%M:%S")
+                except Exception:
+                    return False
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+                return abs((datetime.now(ZoneInfo("UTC")) - dt)
+                           .total_seconds()) <= 7200
+            ok_mc = False
+            for _ in range(3):
+                nowu = datetime.now(ZoneInfo("UTC"))
+                self._call1(self.guider_port, "scope_set_time",
+                            [nowu.strftime("%Y-%m-%dT%H:%M:%S"), "-0"])
+                if _mount_clock_ok():
+                    ok_mc = True
+                    break
+                time.sleep(2)
+            if not ok_mc:
+                return False, ("orologio del MOUNT non impostato "
+                               "(scope_set_time senza effetto)")
+
+            # 3b) LOCATION AL CONNECT — CAUSA VERA della notte 16-17/8
+            # (diagnosticata live 2026-08-17). Senza `scope_set_location` dopo
+            # il connect, il route planner dell'ASIAIR non calcola il percorso:
+            # OGNI goto muore in 41ms con Event ScopeGoto state:fail
+            # error:"internal error" code:300 e `route:[]`, e l'app mostra
+            # "Mount slews failed". La location PERSISTE nel mount (scope_get_info
+            # la rilegge giusta) ma non basta: va (ri)scritta nella sessione.
+            # L'app la manda a ogni connect, l'agente non l'aveva mai mandata —
+            # per questo funzionava solo quando l'utente apriva l'app.
+            # Verificato live: prima 3 goto falliti a 41ms, subito dopo la set
+            # il mount ha slewato su NGC 7635 (Alt 55.8°).
+            # ORDINE VOLUTO: prima si LEGGE, poi si scrive. Un mount fuori
+            # tolleranza (rig spostato) NON va "corretto" scrivendoci sopra:
+            # sarebbe la fine del gate posizione, che da qui in poi troverebbe
+            # sempre le coord giuste perche' gliele abbiamo messe noi.
+            elat = elon = None
+            if self.expected_lat is not None and self.expected_lon is not None:
+                elat, elon = float(self.expected_lat), float(self.expected_lon)
+                _, res_i = self._call1(self.guider_port, "scope_get_info")
+                lat = (res_i or {}).get("Lat") if isinstance(res_i, dict) else None
+                lon = (res_i or {}).get("Lon") if isinstance(res_i, dict) else None
+                if (isinstance(lat, (int, float)) and isinstance(lon, (int, float))
+                        and (abs(lat - elat) > self.pos_tol
+                             or abs(lon - elon) > self.pos_tol)):
+                    return False, (f"posizione mount FUORI tolleranza: "
+                                   f"lat={lat:.4f} lon={lon:.4f} (atteso "
+                                   f"{elat:.4f},{elon:.4f}, tol {self.pos_tol}°)")
+            else:
+                # senza coord attese in config riscrivo quelle che il mount
+                # gia' dichiara: serve comunque a "svegliare" il planner
+                _, res_i = self._call1(self.guider_port, "scope_get_info")
+                if isinstance(res_i, dict):
+                    elat, elon = res_i.get("Lat"), res_i.get("Lon")
+            if not isinstance(elat, (int, float)) or not isinstance(elon, (int, float)):
+                return False, "posizione mount non leggibile (scope_get_info)"
+            lc, _ = self._call1(self.guider_port, "scope_set_location", [elat, elon])
+            if lc != 0:
+                return False, (f"scope_set_location fallita (code {lc}): "
+                               "senza location i goto verrebbero RIFIUTATI")
 
             # 4) camera guida (4400, con priming del SUO canale, per ULTIMA)
             cams_g = _cams(self.guider_port)
@@ -1097,7 +1341,8 @@ class AsiairControl:
                 return False, "camera guida non connessa"
 
             det = ", ".join(f"{k} {v:.0f}s" for k, v in times.items())
-            return True, f"5/5 device in {time.time()-t0:.0f}s ({det})"
+            return True, (f"5/5 device in {time.time()-t0:.0f}s ({det}); "
+                          f"{clock_det}; ora+location al mount OK")
         except Exception as e:
             return False, str(e)
 
@@ -1110,10 +1355,10 @@ class AsiairControl:
     # scritto (chiesto 8.19 -> riletto 8.190001, live 2026-07-27), artefatto di
     # rappresentazione in virgola mobile del firmware. Confrontarli con `!=`
     # faceva fallire la verifica e fermava il flusso PRIMA dei dark, con i flat
-    # gia' fatti. Tolleranza 5 ms: mille volte l'artefatto, venti volte sotto il
-    # passo di 0.1 s con cui l'agente scrive i dark -> un tempo davvero sbagliato
-    # viene comunque rilevato.
-    EXP_TOL = 0.005
+    # gia' fatti. Tolleranza 2 ms: mille volte l'artefatto osservato (1e-6) e
+    # cinque volte sotto il passo di 0.01 s con cui l'agente scrive i dark dal
+    # 2026-08-15 -> un tempo davvero sbagliato viene comunque rilevato.
+    EXP_TOL = 0.002
 
     @staticmethod
     def same_exp(a, b, tol=EXP_TOL) -> bool:
@@ -1122,10 +1367,12 @@ class AsiairControl:
 
     @staticmethod
     def round_exp(v) -> float:
-        """Tempo di posa arrotondato a 1 decimale (richiesta utente 2026-07-27):
-        niente code di decimali da scrivere negli slot. Mai sotto 0.1 s, cosi'
-        un flat da 0.04 s non diventa una posa nulla."""
-        return max(round(float(v), 1), 0.1)
+        """Tempo di posa arrotondato al CENTESIMO di secondo (richiesta utente
+        2026-08-15, prima era 1 decimale): il dark flat deve avere lo STESSO
+        tempo del flat fino al centesimo, altrimenti PixInsight fatica ad
+        accoppiarli (flat 5.74 con dark 5.70 = coppia non riconosciuta).
+        Mai sotto 0.01 s, cosi' un flat brevissimo non diventa una posa nulla."""
+        return max(round(float(v), 2), 0.01)
 
     def get_wheel_names(self):
         """Nomi dei filtri EFW in ordine di posizione (get_wheel_setting.names,
@@ -1536,27 +1783,45 @@ def _kasa_connect(cfg, files, http_cfg, tu):
     managed = [{alias,id,state}]; plug 'ON' se almeno una gestita e' accesa."""
     plug, err, dev, kc, managed = "UNKNOWN", None, None, None, []
     try:
-        kc = KasaCloud(cfg["kasa"], load_kv_file(files["kasa"]), http_cfg, tu)
-        kc.login()
-        dev = kc.resolve(cfg["kasa"].get("device_id", ""), cfg["kasa"].get("plug_alias", ""))
-        kids = kc.children(dev)
-        if kids:  # power strip (KP303)
-            wanted = cfg["kasa"].get("outlets") or [k["alias"] for k in kids]
-            by_alias = {k["alias"]: k for k in kids}
-            for a in wanted:
-                if a in by_alias:
-                    managed.append(by_alias[a])
-                else:
-                    log.warning("Presa '%s' non presente sulla strip", a)
-        else:  # rele' singolo
-            managed.append({"alias": dev.get("alias"), "id": None,
-                            "state": kc.relay_state(dev)})
-        known = [m["state"] for m in managed if m["state"] is not None]
-        if known:
-            plug = "ON" if any(s == 1 for s in known) else "OFF"
-    except Exception as e:
-        err = str(e)
+        kc = KasaCloud(cfg["kasa"], load_kv_file(files["kasa"]), http_cfg, tu,
+                       cfg.get("kasa_token_file", ""))
+    except Exception as e:      # credenziali illeggibili: come prima, kc None
         log.error("Kasa: %s", e)
+        return None, None, [], "UNKNOWN", str(e)
+    # Due tentativi: il primo puo' usare il token in cache, e se il cloud lo
+    # rifiuta (scaduto/invalidato) si rifa' il login VERO una volta sola. Piu'
+    # di uno no: un cloud giu' deve fallire subito, non raddoppiare l'attesa.
+    for attempt in (1, 2):
+        plug, err, dev, managed = "UNKNOWN", None, None, []
+        try:
+            kc.login(force=(attempt == 2))
+            dev = kc.resolve(cfg["kasa"].get("device_id", ""),
+                             cfg["kasa"].get("plug_alias", ""))
+            kids = kc.children(dev)
+            if kids:  # power strip (KP303)
+                wanted = cfg["kasa"].get("outlets") or [k["alias"] for k in kids]
+                by_alias = {k["alias"]: k for k in kids}
+                for a in wanted:
+                    if a in by_alias:
+                        managed.append(by_alias[a])
+                    else:
+                        log.warning("Presa '%s' non presente sulla strip", a)
+            else:  # rele' singolo
+                managed.append({"alias": dev.get("alias"), "id": None,
+                                "state": kc.relay_state(dev)})
+            known = [m["state"] for m in managed if m["state"] is not None]
+            if known:
+                plug = "ON" if any(s == 1 for s in known) else "OFF"
+        except Exception as e:
+            err = str(e)
+            # il token in cache non vale piu': buttalo e riprova col login vero.
+            # Qualunque altro errore (cloud giu', rete) si comporta come prima.
+            if attempt == 1 and kc.token_cached:
+                log.info("Kasa: token in cache rifiutato (%s), rifaccio il login", e)
+                kc.token_forget()
+                continue
+            log.error("Kasa: %s", e)
+        break
     return kc, dev, managed, plug, err
 
 
@@ -1699,6 +1964,10 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                           "/var/lib/sfro-agent/flat_request.json"))
     mf_rep = Path(cfg.get("manual_flat_reply_file",
                           "/var/lib/sfro-agent/flat_reply.json"))
+    # STOP dell'ATTESA flat dal menu (richiesta utente 2026-08-15): durante i
+    # 30' di asciugatura si puo' annullare il flusso e riprendersi il rig.
+    fc_req = Path(cfg.get("flat_cancel_request_file",
+                          "/var/lib/sfro-agent/flat_cancel.json"))
 
     # --- Kasa: lettura stato ---
     kc, dev, managed, plug, kasa_err = _kasa_connect(cfg, files, http_cfg, tu)
@@ -1710,6 +1979,47 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
     powered = False
     snap = None
 
+    # ---------------- CADENZA del sync incrementale (2026-08-15) ----------------
+    # Il costo di una passata rsync e' quasi tutto SCANSIONE dell'albero CIFS
+    # attraverso la VPN, ed e' costante: non dipende da quanti file nuovi ci
+    # sono. Farla a OGNI ciclo (com'era fino a ieri) con l'agente passato a 3
+    # minuti avrebbe voluto dire scandire piu' spesso per spostare ogni volta
+    # meno roba: il ciclo notturno misurato durava 30 s contro i 2 s di quello
+    # diurno, e quasi tutto era questo piu' il push su Sheets.
+    # Ora la passata PERIODICA ha una cadenza sua. I punti FISSI — fine piano
+    # (final_sync), flat, teardown, bottone Rsync del bot — NON passano di qui:
+    # sincronizzano sempre, la cadenza non li riguarda.
+    sync_int = float(sc.get("sync_interval_minutes", 15)) * 60
+
+    def sync_mark():
+        """Segna 'appena sincronizzato': lo chiamano anche le passate fisse,
+        cosi' la periodica non riparte subito dopo una passata completa."""
+        state["last_sync_ts"] = now.isoformat()
+
+    def sync_due() -> bool:
+        last = state.get("last_sync_ts")
+        try:
+            last_dt = datetime.fromisoformat(last) if last else None
+        except (TypeError, ValueError):
+            last_dt = None          # stato vecchio o corrotto: sincronizza
+        return last_dt is None or (now - last_dt).total_seconds() >= sync_int
+
+    def sync_periodic():
+        """Passata incrementale a cadenza. Ritorna il risultato del sync, o
+        None se non era il momento (o se il sync e' disabilitato).
+        Il timestamp si aggiorna PRIMA della passata e anche quando fallisce: a
+        VPN giu' non si martella ogni ciclo, si riprova alla cadenza dopo —
+        l'avviso di errore parte comunque."""
+        if not sc.get("enabled") or not sync_due():
+            return None
+        sync_mark()
+        r = sync_pass(sc, dry_run)
+        if r.get("error"):
+            alert("sync", f"⚠️ Sync FITS in errore: {r['error']}")
+        else:
+            clear_alert("sync")
+        return r
+
     def final_sync():
         """Sync FITS finale + riepilogo. Solo se sync abilitato. Avvisa
         all'INIZIO e alla FINE (richiesta utente: l'rsync via VPN puo'
@@ -1717,6 +2027,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         if not sc.get("enabled"):
             return
         notify("💾 Sync FITS finale verso il NAS avviato (può richiedere alcuni minuti)…")
+        sync_mark()
         r = sync_pass(sc, dry_run)
         if r.get("error"):
             notify(f"⚠️ Sync FITS finale in errore: {r['error']}")
@@ -1973,9 +2284,10 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             ok_g, det_g = ac.set_camera_gain(gain)
             if not ok_g:
                 return fail(f"gain camera non impostato a {gain} ({det_g}).")
-            # tempo del flat arrotondato a 1 decimale (richiesta utente
-            # 2026-07-27): sul dark la differenza (8.19 -> 8.2) e' irrilevante e
-            # gli slot restano su valori puliti
+            # tempo del flat arrotondato al CENTESIMO (richiesta utente
+            # 2026-08-15): il dark flat deve avere lo stesso tempo del flat fino
+            # al centesimo, se no PixInsight non li accoppia (flat 5.74 con dark
+            # 5.70 non riconosciuto come coppia)
             exps = {int(i): ac.round_exp(e) for i, e in exp_map.items()}
             # max_exp sul preset PRE-modifica: eventuali dark 'library' a lunga
             # posa ricreati ad hoc dall'utente non vanno MAI toccati
@@ -2227,6 +2539,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             # Avviso a INIZIO e FINE (richiesta utente: rsync via VPN lento)
             if sc.get("enabled"):
                 notify("💾 Sync NAS dei flat avviato (può richiedere alcuni minuti)…")
+                sync_mark()   # passata fissa: la periodica non riparte subito
                 r = sync_pass(sc, dry_run)
                 if r.get("error"):
                     return fail(f"sync NAS finale in errore: {r['error']}. "
@@ -2280,12 +2593,16 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                    "Sessione conclusa, tutto a riposo. 🌅")
             return
 
-    # ------------- AVVIO ANTICIPATO DEL RIG (T-lead dalla notte nautica) -------------
-    # Dal 2026-07-04 l'agente avvia il rig DA ZERO (specifica utente): 5 min prima
-    # del crepuscolo nautico accende KASA, aspetta il boot, connette i 5 device
-    # (connect_all: PRIMING get_connected_cameras + ora al mount) e avvia il piano
-    # (ac.start APRE anche il flat panel). Niente rig acceso per ore in attesa.
-    # DEVE stare PRIMA del blocco flat: a T-5 flat_stage puo' essere ancora
+    # ------------- INIZIALIZZAZIONE DEL RIG (T-lead dalla notte nautica) -------------
+    # Dal 2026-07-04 l'agente porta su il rig DA ZERO (specifica utente): a T-lead
+    # dal crepuscolo nautico accende KASA, aspetta il boot e connette i device
+    # (connect_all: PRIMING get_connected_cameras + ora al mount).
+    # RIVISTO 2026-08-16 su specifica dell'utente: il T-lead passa a 10 minuti e
+    # si FERMA all'inizializzazione — connessione + anti-dew + fascia + COOLER.
+    # Il piano NON parte qui: parte al crepuscolo nautico, dal ramo di notte, che
+    # trova i device gia' connessi. Cosi' i 10 minuti servono a quello per cui
+    # esistono, portare la camera in temperatura prima della prima posa.
+    # DEVE stare PRIMA del blocco flat: a T-10 flat_stage puo' essere ancora
     # 'done' dal mattino e farebbe early-return.
     su = cfg.get("startup", {}) or {}
 
@@ -2324,17 +2641,16 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         if snap2 and (snap2.get("plan_started") or snap2.get("capturing")):
             notify(f"🔗 Rig avviato e connesso ({det_c}). Piano gia' in corso.")
             return
-        try:
-            ok_s, det_s = ac.start(snap2)
-        except Exception as e:
-            ok_s, det_s = False, f"eccezione: {e}"
-        if ok_s:
-            notify(f"🚀 Rig avviato da zero ({det_c}). OF2 APERTO, piano "
-                   f"«{(snap2 or {}).get('plan_name')}» avviato."
-                   + (f"\n🔥 {det_s}" if det_s else ""))
-        else:
-            alert("startup", f"⚠️ Rig connesso ({det_c}) ma avvio piano non "
-                             f"riuscito: {det_s}.")
+        # SOLO INIZIALIZZAZIONE (specifica utente 2026-08-16): qui il piano NON
+        # parte. Il T-lead serve a dare corrente, connettere i device e portare
+        # la camera in temperatura; l'avvio e' compito del ramo di notte, al
+        # crepuscolo nautico, che trova i device gia' connessi e chiama start().
+        # Prima del 2026-08-16 il T-5 faceva anche partire il piano: significava
+        # riprendere con la camera ancora calda e con il cielo ancora chiaro.
+        prep_txt = ac.prepare()
+        notify(f"🔗 Rig acceso e connesso ({det_c}).\n🔥 {prep_txt}\n"
+               f"⏳ Piano in attesa: parte alle {dusk_txt}, all'inizio della "
+               "notte nautica.")
 
     # SOLO A TETTO APERTO (correzione utente 2026-07-04): se il tetto e' chiuso
     # resta tutto spento; il T-5 apre solo la FINESTRA di monitoraggio, che poi
@@ -2344,10 +2660,10 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             and roof == "OPEN"
             and state.get("startup_night_id") != night_id
             and not manual_shutdown_active()
-            and 0 <= (n_start - now).total_seconds() <= float(su.get("lead_minutes", 5)) * 60):
+            and 0 <= (n_start - now).total_seconds() <= float(su.get("lead_minutes", 10)) * 60):
         if dry_run:
-            log.info("[dry-run] avvio rig T-%s: KASA + connect_all + piano",
-                     su.get("lead_minutes", 5))
+            log.info("[dry-run] init rig T-%s: KASA + connect_all + cooler/fascia "
+                     "(piano NON avviato qui)", su.get("lead_minutes", 10))
         else:
             startup_rig()
         return _cycle_result(now, in_night, night_id, roof, plug, powered,
@@ -2402,6 +2718,48 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             log.info("[dry-run] richiesta flat manuale presente: la lascio")
         else:
             manual_flat_request()
+
+    # ---------- STOP dell'ATTESA flat dal menu (richiesta utente 2026-08-15) ----------
+    # Va QUI, prima del blocco flat: nel ciclo in cui arriva l'annullo i flat non
+    # devono partire nemmeno se i 30' di asciugatura sono appena scaduti.
+    # Dopo manual_flat_request: se arrivassero entrambe le richieste vince
+    # l'ultima intenzione, cioe' lo stop.
+    def flat_cancel_request():
+        """Annulla il flusso flat durante l'ATTESA: nessun comando all'ASIAIR,
+        il rig resta esattamente com'e' (pannello chiuso, cooler acceso, fascia
+        al 100%, mount in park) e torna in carico all'utente.
+        Vale SOLO in fase 'drying' (attesa asciugatura e attesa raffreddamento
+        camera): un autorun flat/dark gia' partito non si tocca. La richiesta
+        non applicabile viene comunque consumata (file vecchio rimasto li')."""
+        fc_req.unlink(missing_ok=True)
+        stage = state.get("flat_stage")
+        if stage != "drying":
+            notify("ℹ️ Richiesta di STOP flat ignorata: "
+                   + (f"il flusso è in fase «{stage}»." if stage
+                      else "nessuna attesa flat in corso."))
+            return
+        # 'cancelled' e NON None: non e' una fase attiva (il promemoria periodico
+        # di spegnimento riparte, come chiesto) ma e' un valore PIENO, quindi i
+        # rami che all'alba rifanno teardown+flat — che pretendono "nessuna fase
+        # flat" — restano spenti. Il piano non riparte: lo blocca teardown_done.
+        state["flat_stage"] = "cancelled"
+        state["flat_cancel_ts"] = now.isoformat()
+        for k in ("flat_wait_notified", "flat_cool_ts", "flat_groups",
+                  "dark_groups", "flat_ask_ts", "flat_ask_reminder_ts"):
+            state.pop(k, None)
+        # il promemoria "spegnili tu" riparte, ma non nello stesso ciclo: il
+        # messaggio qui sotto lo dice gia'. Il primo arriva un intervallo dopo.
+        state["last_kasa_reminder_ts"] = now.isoformat()
+        notify("🛑 Attesa flat INTERROTTA su tua richiesta: niente flat né dark.\n"
+               "Il rig resta com'è (pannello chiuso, cooler acceso, fascia "
+               "anticondensa al 100%, mount in park): da qui in poi decidi tu.\n"
+               "Quando hai finito spegni con /sfro → Shutdown.")
+
+    if fc_req.exists():
+        if dry_run:
+            log.info("[dry-run] richiesta di stop flat presente: la lascio")
+        else:
+            flat_cancel_request()
 
     # Il flusso flat ha PRECEDENZA su tutto il resto del ciclo: finche' e' attivo
     # (o concluso, fino a nuova notte) la logica normale non deve girare, altrimenti
@@ -2488,15 +2846,19 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         for k in ("nautical_announced", "imaging_active", "teardown_done",
                   "error_notified", "asiair_power_on_ts", "last_wait_ts",
                   "last_kasa_reminder_ts", "plan_name",
-                  "plan_stopped_ts", "session_finalized",
+                  "plan_stopped_ts", "plan_completed", "session_finalized",
+                  "plan_stall_left", "plan_stall_ts",
                   "flat_stage", "flat_closed_ts", "flat_started_ts", "flat_error",
                   "flat_filters", "flat_groups", "flat_wait_notified",
                   "flat_letters", "flat_times", "dark_groups", "flat_cool_ts",
                   "flat_manual", "flat_ask_shutdown", "flat_ask_ts",
-                  "flat_ask_reminder_ts",
+                  "flat_ask_reminder_ts", "flat_cancel_ts",
                   "weather_closed", "weather_manual", "weather_restart_done",
                   "weather_reopen_notified", "weather_idle_ts",
-                  "weather_resume_announced", "dawn_plan_checked"):
+                  "weather_resume_announced", "dawn_plan_checked",
+                  # nuova notte = prima passata subito, senza aspettare la
+                  # cadenza a partire dal sync dell'alba precedente
+                  "last_sync_ts"):
             state.pop(k, None)
 
     # annuncio d'inizio notte (una volta), con lo stato del tetto
@@ -2593,9 +2955,14 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 if (now - stopped).total_seconds() >= idle_s:
                     if ff.get("enabled") and not state.get("teardown_done"):
                         # fine piano anticipata (scelta utente): teardown con
-                        # cooler tenuto + flusso flat gia' in notte
-                        do_teardown("🏁 Piano fermo da 10 min: chiusura sessione.",
-                                    "piano_fermo_10m")
+                        # cooler tenuto + flusso flat gia' in notte. Il testo
+                        # dice COME e' finito il piano (2026-08-15): esaurito
+                        # (fine normale) o fermo per altro motivo.
+                        do_teardown(
+                            "🏁 Piano COMPLETATO: chiusura sessione."
+                            if state.get("plan_completed") else
+                            "🏁 Piano fermo da 10 min: chiusura sessione.",
+                            "piano_fermo_10m")
                     else:
                         session_finalize("piano_fermo_10m")
             if plan_on:
@@ -2603,30 +2970,80 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 state["imaging_active"] = True
                 state["plan_name"] = snap.get("plan_name")
                 state.pop("error_notified", None)
+                # il piano scatta di nuovo: qualunque "completato" precedente
+                # non vale piu' (ripresa dopo pausa meteo o riavvio manuale)
+                state.pop("plan_completed", None)
                 # piano in corso: l'alba DEVE poter fare teardown+flat anche se un
                 # teardown meteo aveva alzato il flag (sicurezza, richiesta 2026-07-24)
                 state.pop("teardown_done", None)
                 clear_alert("plan_error")
-                if sc.get("enabled"):
-                    r = sync_pass(sc, dry_run)   # incrementale, silenzioso
-                    if r.get("error"):
-                        alert("sync", f"⚠️ Sync FITS in errore: {r['error']}")
-                    else:
-                        clear_alert("sync")
-                session_update()   # ingest dei FITS appena sincronizzati + push
+                # WATCHDOG STALLO (2026-08-17): la notte del 17/8 il piano
+                # risultava "avviato" (is_plan_started E is_working true)
+                # mentre il mount rifiutava 3162 goto di fila: zero frame per
+                # 2h15m e nessun avviso. Il progresso VERO e' il residuo del
+                # piano (get_plan, lo stesso del 🏁): se non scende per
+                # plan_stall_minutes -> allarme, ripetuto col cooldown degli
+                # alert. SOLO avviso: la diagnosi resta all'utente, l'agente
+                # non tocca mai una ripresa in corso. first_delay escluso
+                # (attesa programmata: residuo fermo per costruzione). NB il
+                # residuo cala a fine posa: la soglia deve stare sopra
+                # posa massima + flip/autofocus (300s + ~10' -> default 20').
+                wd_m = float(acfg.get("plan_stall_minutes", 20))
+                if wd_m > 0 and snap.get("capture_state") != "first_delay":
+                    okp, left, _ = ac.plan_left()
+                    if okp:
+                        if state.get("plan_stall_left") != left:
+                            state["plan_stall_left"] = left
+                            state["plan_stall_ts"] = now.isoformat()
+                            clear_alert("plan_stall")
+                        elif state.get("plan_stall_ts"):
+                            stall_m = (now - datetime.fromisoformat(
+                                state["plan_stall_ts"])).total_seconds() / 60
+                            if stall_m >= wd_m:
+                                alert("plan_stall",
+                                      f"🛑 Piano «{snap.get('plan_name')}» avviato ma "
+                                      f"SENZA PROGRESSI da ~{int(stall_m)} min: "
+                                      "residuo invariato (goto rifiutato? guida "
+                                      "persa? plate solve?). Controlla l'ASIAIR "
+                                      "dall'app.")
+                r = sync_periodic()   # incrementale a cadenza, silenzioso
+                # l'ingest legge i FITS DAL NAS: se non e' passato niente di
+                # nuovo non c'e' nulla da ingerire e il giro sarebbe a vuoto.
+                # Col sync disabilitato i frame arrivano per altre vie: allora
+                # si ingerisce a ogni ciclo, come si e' sempre fatto.
+                if not sc.get("enabled") or (r and r.get("files")):
+                    session_update()   # ingest dei FITS sincronizzati + push
             elif autorun_on:
                 # autorun MANUALE (flat/dark/posa) in corso: non e' il piano, non lo
                 # traccio come imaging e non avvio nulla; sincronizzo e basta.
-                if sc.get("enabled"):
-                    r = sync_pass(sc, dry_run)
-                    if r.get("error"):
-                        alert("sync", f"⚠️ Sync FITS in errore: {r['error']}")
-                    else:
-                        clear_alert("sync")
+                sync_periodic()
             elif state.get("imaging_active") and not state.get("error_notified"):
-                # eravamo in ripresa, ora il piano e' fermo a tetto aperto -> ERRORE
-                notify("⚠️ Il piano si è FERMATO in modo non previsto (errore). "
-                       "Controlla l'ASIAIR/guida.")
+                # Eravamo in ripresa e ora il piano e' fermo a tetto aperto:
+                # ESAURITO o INTERROTTO? Lo dice il residuo del piano
+                # (get_plan): left_time_sec a zero su tutti i target abilitati
+                # = tutte le pose previste sono state fatte, ed e' una fine
+                # NORMALE, non un errore (correzione richiesta dall'utente il
+                # 2026-08-15: a pose esaurite arrivava l'avviso di errore).
+                # error_notified resta il flag "gia' annunciato" per entrambi i
+                # casi: senza, il messaggio si ripeterebbe ad ogni ciclo.
+                okp, left, detp = ac.plan_left()
+                idle_m = int(float(slc.get("idle_finalize_minutes", 10)))
+                coda = (" Chiusura sessione"
+                        + (" e flat" if ff.get("enabled") else "")
+                        + f" tra ~{idle_m} minuti.")
+                if okp and left <= 0:
+                    state["plan_completed"] = True
+                    notify(f"🏁 Piano «{state.get('plan_name') or snap.get('plan_name')}» "
+                           f"COMPLETATO: tutte le pose previste sono state "
+                           f"fatte ({detp})." + coda)
+                elif okp:
+                    notify(f"⚠️ Il piano si è FERMATO con ~{max(1, left // 60)} min "
+                           f"di pose ancora da fare ({detp}). Controlla "
+                           "l'ASIAIR/guida." + coda)
+                else:
+                    notify("⚠️ Il piano si è FERMATO in modo non previsto e il "
+                           f"residuo non è leggibile ({detp}). Controlla "
+                           "l'ASIAIR/guida." + coda)
                 state["error_notified"] = True
                 state["imaging_active"] = False
                 state["plan_stopped_ts"] = now.isoformat()

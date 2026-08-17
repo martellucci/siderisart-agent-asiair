@@ -242,9 +242,10 @@ cyc("N8e -> dark", flats_status=(True, False, 0, None, ""))
 assert state["flat_times"] == {"2:100": 2.0, "2:0": 8.190001}, state["flat_times"]
 assert "slots(dark,[2],exp={2: 2.0})" in CALLS, CALLS   # prima gain 100
 cyc("N8f dark G@0", flats_status=(True, False, 0, None, ""))
-# nello slot dark ci va il tempo ARROTONDATO a 1 decimale (2026-07-27)
-assert "slots(dark,[2],exp={2: 8.2})" in CALLS, CALLS
-assert msg_has("Pose: G 8.2s"), MSGS
+# nello slot dark ci va il tempo del flat ARROTONDATO al CENTESIMO (2026-08-15:
+# con 1 decimale diventava 8.2 e PixInsight non accoppiava flat e dark flat)
+assert "slots(dark,[2],exp={2: 8.19})" in CALLS, CALLS
+assert msg_has("Pose: G 8.19s"), MSGS
 cyc("N8g chiusura", flats_status=(True, False, 0, None, ""))
 assert state.get("flat_stage") == "done"
 

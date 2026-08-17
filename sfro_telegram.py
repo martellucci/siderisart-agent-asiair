@@ -25,6 +25,10 @@ operazioni su ASIAIR/KASA:
                passa la palla all'agente (asciugatura -> flat per filtro/gain di
                stanotte -> dark -> sync NAS) che a fine corsa CHIEDE se
                spegnere: la risposta torna qui (bottoni fs:yes/fs:no).
+  - Stop Flat: (conferma Si'/No) interrompe l'ATTESA dei 30 minuti prima dei
+               flat: niente flat ne' dark, rig lasciato com'e' e in carico
+               all'utente (il promemoria di spegnere continua). Solo durante
+               l'attesa: un autorun flat/dark gia' partito non si tocca.
 
 Diagnostica errori a scala (richiesta utente): VPN giu' -> KASA irraggiungibile
 -> ASIAIR irraggiungibile -> ASIAIR raggiungibile ma in errore (con dettaglio).
@@ -57,6 +61,7 @@ MENU_KB = [
      {"text": "\U0001F534 Shutdown", "callback_data": "m:shutdown"}],
     [{"text": "\U0001F4BE Rsync", "callback_data": "m:rsync"},
      {"text": "\U0001F312 Flat/Dark", "callback_data": "m:flatdark"}],
+    [{"text": "\U0001F6D1 Stop Flat", "callback_data": "m:stopflat"}],
 ]
 
 CONFIRM_TEXT = {"start": "🚀 Stai per avviare ASIAIR, confermi?",
@@ -67,7 +72,25 @@ CONFIRM_TEXT = {"start": "🚀 Stai per avviare ASIAIR, confermi?",
                             "(attesa temperatura)\n"
                             "• asciugatura, poi flat/dark dei filtri di stanotte "
                             "e sync sul NAS\n"
-                            "• alla fine ti chiedo se spegnere tutto"}
+                            "• alla fine ti chiedo se spegnere tutto",
+                "stopflat": "🛑 Interrompo l'attesa dei flat?\n"
+                            "• niente flat né dark stanotte\n"
+                            "• il rig resta com'è (pannello chiuso, cooler "
+                            "acceso, fascia al 100%) e torna in carico a te\n"
+                            "• continua il promemoria periodico di spegnere\n"
+                            "• «No» = il countdown prosegue"}
+
+# rifiuti dello Stop Flat, per fase del flusso (2026-08-15): si annulla SOLO
+# l'attesa, un autorun flat/dark gia' partito non si tocca
+STOPFLAT_NO = {
+    "running": "i FLAT sono già partiti: un autorun in corso non lo fermo.",
+    "darks": "i DARK sono già partiti: un autorun in corso non lo fermo.",
+    "ask_shutdown": "flat e dark sono già finiti: sto aspettando la tua "
+                    "risposta sullo spegnimento.",
+    "done": "il flusso flat è già concluso.",
+    "cancelled": "l'attesa flat è già stata interrotta.",
+    "error": "il flusso flat è già fermo in errore.",
+}
 
 
 class SfroBot:
@@ -96,6 +119,9 @@ class SfroBot:
                                    "/var/lib/sfro-agent/flat_request.json"))
         self.mf_rep = Path(cfg.get("manual_flat_reply_file",
                                    "/var/lib/sfro-agent/flat_reply.json"))
+        # stop dell'ATTESA flat (2026-08-15): stessa meccanica, un file solo
+        self.fc_req = Path(cfg.get("flat_cancel_request_file",
+                                   "/var/lib/sfro-agent/flat_cancel.json"))
         self.state_file = Path(cfg.get("state_file", ""))
         self.offset = 0
         self.op_lock = threading.Lock()   # una sola operazione mutante alla volta
@@ -177,7 +203,7 @@ class SfroBot:
             ack("Leggo lo stato…")
             threading.Thread(target=self._safe, args=("Status", self.do_status, th),
                              daemon=True).start()
-        elif data in ("m:start", "m:shutdown", "m:flatdark"):
+        elif data in ("m:start", "m:shutdown", "m:flatdark", "m:stopflat"):
             ack()
             self.ask_confirm(data[2:], th)
         elif data == "m:goplan":
@@ -193,7 +219,11 @@ class SfroBot:
             pend = self.pending.pop(mid, None)
             if action == "no":
                 ack("Annullato")
-                self.send("❌ Operazione annullata.", thread=th)
+                # il «No» allo Stop Flat non e' un'operazione annullata
+                # qualunque: vuol dire che il countdown va avanti (2026-08-15)
+                self.send("👍 Nessuna interruzione: l'attesa flat prosegue."
+                          if pend and pend[0] == "stopflat"
+                          else "❌ Operazione annullata.", thread=th)
                 return
             if pend is None or pend[0] != action or time.time() - pend[1] > 600:
                 ack()
@@ -206,6 +236,8 @@ class SfroBot:
                 self.spawn("Shutdown", self.do_shutdown, th)
             elif action == "flatdark":
                 self.spawn("Flat/Dark", self.do_flatdark, th)
+            elif action == "stopflat":
+                self.spawn("Stop Flat", self.do_stopflat, th)
         elif data.startswith("fs:"):
             # risposta alla domanda di fine flusso flat MANUALE: il messaggio
             # con i bottoni lo manda l'AGENTE (non e' nel dizionario pending)
@@ -619,11 +651,44 @@ class SfroBot:
             self.send(f"⚠️ Fascia anticondensa NON impostata al {hv}% ({deth}): "
                       "proseguo comunque.", thread=th)
         dry = int(self.ff.get("dry_wait_minutes", 30))
-        self.send(f"✅ Richiesta presa in consegna dall'agente (entro 5 min).\n"
+        self.send(f"✅ Richiesta presa in consegna dall'agente (entro 3 min).\n"
                   f"⏳ Asciugatura {dry} min a pannello chiuso"
                   + (f", fascia anticondensa al {hv}%" if okh else "")
                   + ", poi flat e dark dei filtri di stanotte e sync sul NAS.\n"
                   "A fine processo ti chiederò se spegnere tutto.", thread=th)
+
+    def do_stopflat(self, th):
+        """Bottone Stop Flat (richiesta utente 2026-08-15): interrompe l'ATTESA
+        dei 30 minuti tra la fine del piano e i flat. Niente flat né dark: il
+        rig resta com'è e torna in carico all'utente (il promemoria periodico
+        di spegnere continua ad arrivare).
+        Qui non si comanda NULLA all'ASIAIR — si scrive solo la richiesta per
+        l'agente, che la esegue al ciclo successivo (entro 3 min): funziona
+        anche con la VPN giù. Vale solo in fase 'drying': un autorun flat/dark
+        già partito non si tocca."""
+        stage = self.flat_stage()
+        if stage != "drying":
+            self.send("ℹ️ Niente da interrompere: "
+                      + STOPFLAT_NO.get(stage, "nessuna attesa flat in corso."),
+                      thread=th)
+            return
+        if self.fc_req.exists():
+            self.send("ℹ️ Interruzione già richiesta: l'agente la prende in "
+                      "carico entro pochi minuti.", thread=th)
+            return
+        try:
+            self.fc_req.parent.mkdir(parents=True, exist_ok=True)
+            self.fc_req.write_text(json.dumps(
+                {"ts": datetime.now(self.tz).isoformat(), "source": "telegram"}))
+        except Exception as e:
+            self.send(f"⛔ Stop Flat NON riuscito: non riesco a scrivere la "
+                      f"richiesta per l'agente ({e}). L'attesa prosegue.",
+                      thread=th)
+            return
+        self.send("🛑 Interruzione richiesta: l'agente la prende in carico "
+                  "entro 3 minuti e te lo conferma.\n"
+                  "Niente flat né dark: il rig resta acceso e com'è, decidi tu. "
+                  "Per spegnere: /sfro → Shutdown.", thread=th)
 
     def wait_ask_stage(self, th, timeout=40) -> bool:
         """Aspetta che lo stato dell'agente sia davvero in 'ask_shutdown': il

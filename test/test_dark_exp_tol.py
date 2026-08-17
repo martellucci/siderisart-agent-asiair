@@ -1,7 +1,8 @@
-"""Test OFFLINE della verifica degli slot dark: tempo di posa arrotondato a 1
-decimale e confronto TOLLERANTE (guasto 2026-07-27: chiesto 8.19, riletto
-8.190001 dall'ASIAIR -> 'verifica fallita' e flusso fermo prima dei dark, con i
-flat gia' fatti). Qui si stubba solo il trasporto (_call1): configure_autorun_slots
+"""Test OFFLINE della verifica degli slot dark: tempo di posa arrotondato al
+CENTESIMO (dal 2026-08-15: con 1 decimale il dark del flat da 5.74 s finiva a
+5.70 s e PixInsight non riconosceva la coppia) e confronto TOLLERANTE (guasto
+2026-07-27: chiesto 8.19, riletto 8.190001 dall'ASIAIR -> 'verifica fallita' e
+flusso fermo prima dei dark, con i flat gia' fatti). Qui si stubba solo il trasporto (_call1): configure_autorun_slots
 gira per davvero su un finto set di slot che RIPRODUCE l'artefatto float."""
 import sys
 from pathlib import Path as _P
@@ -65,19 +66,22 @@ assert ok, f"T1 il guasto del 27/7 si ripete: {det}"
 assert n == 60, (n, det)
 print("T1 exp 8.19 -> riletto 8.190001:", det)
 
-# T2: arrotondamento a 1 decimale (quello che fa ora _start_dark_group)
-assert A.AsiairControl.round_exp(8.190001) == 8.2
-assert A.AsiairControl.round_exp(1.93) == 1.9
-assert A.AsiairControl.round_exp(0.04) == 0.1, "mai una posa nulla"
+# T2: arrotondamento al CENTESIMO (quello che fa ora _start_dark_group)
+assert A.AsiairControl.round_exp(8.190001) == 8.19
+assert A.AsiairControl.round_exp(1.93) == 1.93
+assert A.AsiairControl.round_exp(5.74) == 5.74, "il caso segnalato: 5.74 -> 5.74"
+assert A.AsiairControl.round_exp(5.7449) == 5.74
+assert A.AsiairControl.round_exp(0.04) == 0.04, "non piu' portato a 0.1"
+assert A.AsiairControl.round_exp(0.001) == 0.01, "mai una posa nulla"
 assert A.AsiairControl.round_exp(15.0) == 15.0
 ac, calls = build(slots())
-ok, n, det = ac.configure_autorun_slots("dark", {5, 0}, 30.0, {5: 8.2, 0: 1.9})
+ok, n, det = ac.configure_autorun_slots("dark", {5, 0}, 30.0, {5: 8.19, 0: 1.93})
 assert ok, det
-assert (8, True, 8.2) in calls and (9, True, 1.9) in calls, calls
-print("T2 exp arrotondate scritte negli slot:", calls)
+assert (8, True, 8.19) in calls and (9, True, 1.93) in calls, calls
+print("T2 exp al centesimo scritte negli slot:", calls)
 
 # T3: uno slot con la posa DAVVERO sbagliata deve ancora fallire (la tolleranza
-# e' 5 ms, non un colabrodo): lo slot 9 si abilita ma resta a 1.0 s invece di 1.9
+# e' 2 ms, non un colabrodo): lo slot 9 si abilita ma resta a 1.0 s invece di 1.93
 ac, _ = build(slots())
 ac_set = ac._call1
 
@@ -91,22 +95,25 @@ def exp_ignorata(port, method, params=None):
 
 
 ac._call1 = exp_ignorata
-ok, _n, det = ac.configure_autorun_slots("dark", {5, 0}, 30.0, {5: 8.2, 0: 1.9})
+ok, _n, det = ac.configure_autorun_slots("dark", {5, 0}, 30.0, {5: 8.19, 0: 1.93})
 assert not ok and "verifica fallita" in det, det
 assert "attesi dark filtri [0, 5]" in det, det   # messaggio diagnostico
 print("T3 posa sbagliata rilevata:", det)
 
-# T4: la tolleranza copre l'artefatto ma non un decimo di secondo
+# T4: la tolleranza copre l'artefatto ma non un CENTESIMO di secondo (dal
+# 2026-08-15 e' quello il passo con cui si scrivono i dark)
 assert A.AsiairControl.same_exp(8.19, 8.190001)
 assert A.AsiairControl.same_exp(300.0, 300.0001)
 assert not A.AsiairControl.same_exp(8.2, 8.19), "0.01 s NON e' artefatto"
+assert not A.AsiairControl.same_exp(5.74, 5.73), "un centesimo va rilevato"
+assert not A.AsiairControl.same_exp(5.74, 5.70), "il caso segnalato"
 assert not A.AsiairControl.same_exp(1.9, 2.0)
 assert A.AsiairControl.same_exp(None, 0)
 
 # T5: il dark 'library' da 300 s (slot 10, stesso filtro) non viene MAI toccato,
 # e nemmeno lo slot flat: si configurano solo gli 8 e 9
 ac, calls = build(slots())
-ok, _n, det = ac.configure_autorun_slots("dark", {5, 0}, 30.0, {5: 8.2, 0: 1.9})
+ok, _n, det = ac.configure_autorun_slots("dark", {5, 0}, 30.0, {5: 8.19, 0: 1.93})
 assert ok, det
 assert not any(c[0] == 10 for c in calls), f"dark library toccato: {calls}"
 assert (3, False, 8.19) in calls, f"lo slot flat va DISABILITATO: {calls}"
@@ -115,7 +122,7 @@ print("T5 dark library non toccato, flat disabilitato:", det)
 # T6: filtro senza slot dark utilizzabile -> avviso nel dettaglio (finisce su
 # Telegram): prima passava in silenzio e la notte restava senza quei dark
 ac, calls = build([dk(9, 0, 1.0)])
-ok, _n, det = ac.configure_autorun_slots("dark", {5, 0}, 30.0, {5: 8.2, 0: 1.9})
+ok, _n, det = ac.configure_autorun_slots("dark", {5, 0}, 30.0, {5: 8.19, 0: 1.93})
 assert ok, det
 assert "nessuno slot" in det and "[5]" in det, det
 print("T6 filtro senza slot:", det)
