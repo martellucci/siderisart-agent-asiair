@@ -640,6 +640,18 @@ def _hms(seconds):
         return seconds
 
 
+def sync_piani(cfg: dict) -> dict:
+    """Rilegge i piani di acquisizione da Drive nella cache locale (best-effort:
+    una cartella irraggiungibile non deve far fallire il diario, la dashboard
+    esce con l'ultimo piano buono). Va chiamata PRIMA di build_report."""
+    try:
+        import sfro_piani
+        return sfro_piani.sync(cfg)
+    except Exception as e:
+        log.warning("piani di acquisizione non aggiornati: %s", e)
+        return {"error": str(e)}
+
+
 def build_report(cfg: dict) -> dict:
     """Rigenera la dashboard HTML (best-effort: non deve mai far fallire il
     diario). Ritorna il dict di sfro_report.build o {'error': ...}."""

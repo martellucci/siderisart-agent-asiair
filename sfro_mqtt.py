@@ -100,6 +100,22 @@ SENSORS = [
     ("sensor", "power_input_v", "Tensione uscite", "power", "input_v", "V", "voltage"),
     ("sensor", "power_dew_a", "Corrente fascia anticondensa", "power", "dew_heater_a", "A", "current"),
     ("sensor", "power_cam_a", "Corrente camera", "power", "camera_a", "A", "current"),
+    # meteo di sito + stima condensa (10m, stazione Alpaca SFRO — 2026-09-06).
+    # I delta (margine) NON hanno device_class 'temperature': HA convertirebbe
+    # una differenza come se fosse una temperatura assoluta (3°C -> 37.4°F).
+    ("sensor", "meteo_temp", "Temperatura esterna", "meteo", "temp_c", "°C", "temperature"),
+    ("sensor", "meteo_hum", "Umidità esterna", "meteo", "humidity_pct", "%", "humidity"),
+    ("sensor", "meteo_dew", "Punto di rugiada", "meteo", "dewpoint_c", "°C", "temperature"),
+    ("sensor", "meteo_sky", "Temperatura cielo", "meteo", "sky_temp_c", "°C", "temperature"),
+    ("sensor", "meteo_wind", "Vento", "meteo", "wind_ms", "m/s", "wind_speed"),
+    ("sensor", "meteo_rain", "Pioggia", "meteo", "rain_mm_h", "mm/h", None),
+    ("sensor", "dew_margin", "Margine condensa", "meteo", "margin_c", "°C", None),
+    ("sensor", "dew_margin_min", "Margine condensa minimo notte", "meteo", "margin_min_c", "°C", None),
+    ("sensor", "dew_wet_minutes", "Minuti con condensa", "meteo", "wet_minutes", "min", "duration"),
+    ("sensor", "dew_verdict", "Verdetto condensa", "meteo", "verdict", None, None),
+    ("sensor", "dew_dry_wait", "Attesa asciugatura", "meteo", "dry_wait_min", "min", "duration"),
+    ("binary", "condensa", "Condensa in atto", "meteo", "condensa", None, "moisture"),
+    ("binary", "brina", "Sotto zero (brina)", "meteo", "frost", None, "cold"),
     # agent (5m, qui derivati: notte nautica + ripresa + asiair online)
     ("binary", "in_night", "Notte nautica", "agent", "in_nautical_night", None, "running"),
     ("binary", "imaging", "Ripresa in corso", "agent", "imaging_active", None, "running"),
@@ -643,7 +659,40 @@ class Publisher:
             log.info("poll mount: %s", e)
         out["agent"] = {"in_nautical_night": in_night, "imaging_active": capturing,
                         "asiair_online": online}
+        meteo = self._meteo_payload()
+        if meteo:
+            out["meteo"] = meteo
         return out
+
+    def _meteo_payload(self):
+        """Meteo di sito + stima condensa (2026-09-06).
+
+        La lettura della stazione la fa QUESTO servizio, non l'agente: cosi' i
+        sensori HA sono vivi 24h (l'agente campiona solo in notte a tetto
+        aperto). Le statistiche della notte e il verdetto arrivano invece da
+        state.json, che l'agente scrive in modo atomico: e' il dato su cui ha
+        DECISO l'attesa, e va mostrato tale e quale."""
+        d = self.cfg.get("dew", {}) or {}
+        if not d.get("enabled", False):
+            return None
+        out = {}
+        try:
+            w = A.read_weather(self.cfg["roof"], d)
+            if w:
+                out = A.dew_margin(w, d)
+        except Exception as e:
+            log.info("meteo: %s", e)
+        try:
+            st = json.loads(Path(self.cfg.get("state_file",
+                                              "/var/lib/sfro-agent/state.json")).read_text())
+        except Exception:
+            st = {}
+        out["margin_min_c"] = st.get("dew_margin_min")
+        out["wet_minutes"] = st.get("dew_wet_minutes", 0)
+        out["samples"] = st.get("dew_samples", 0)
+        out["verdict"] = st.get("dew_verdict") or "—"
+        out["dry_wait_min"] = st.get("dry_wait_effective")
+        return out or None
 
     # ---------------- LOOP ----------------
     def run(self):

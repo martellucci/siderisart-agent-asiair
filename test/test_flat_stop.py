@@ -68,7 +68,7 @@ KB = dict(in_night=True, roof="OPEN", asiair_ping=True, night="2026-08-15",
 A.nautical_window = lambda now, loc, tz, dep=12: (KB["in_night"], None, None, KB["night"])
 A.vpn_diagnose = lambda host, probe="": {"vpn_up": True, "asiair_up": KB["asiair_ping"],
                                          "cause": ""}
-A.http_get_json = lambda u, h: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
+A.http_get_json = lambda u, h, session=None: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
 A.sync_pass = lambda sc, dry: (CALLS.append("sync"),
                                {"ok": True, "files": 7, "error": None})[1]
 A.time.sleep = lambda s: None

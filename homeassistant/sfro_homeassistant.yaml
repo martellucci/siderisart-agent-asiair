@@ -1,6 +1,10 @@
-# Home Assistant - sensori MQTT SFRO (configuration.yaml)
-# Le entita' compaiono da sole con MQTT Discovery; questo YAML serve solo
-# se preferisci la configurazione manuale.
+# Home Assistant - sensori MQTT SFRO (packages/sfro.yaml)
+# ATTENZIONE: in config.yaml la discovery e' DISATTIVATA
+# (mqtt.discovery: false) per non avere entita' doppie, quindi questo file NON
+# e' una comodita': e' l'unica sorgente delle entita' in HA. Va tenuto
+# allineato a mano con quello che sta davvero in /config/packages/sfro.yaml.
+# Ultimo allineamento 2026-09-06 (state_class sui sensori di guida, aggiunto
+# in HA dall'utente per le statistiche a lungo termine).
 
 mqtt:
   sensor:
@@ -9,30 +13,35 @@ mqtt:
       state_topic: sfro/guide
       value_template: "{{ value_json.rms_total }}"
       unit_of_measurement: '"'
+      state_class: measurement
       availability_topic: sfro/status
     - name: "SFRO Guide RMS RA"
       unique_id: sfro_guide_rms_ra
       state_topic: sfro/guide
       value_template: "{{ value_json.rms_ra }}"
       unit_of_measurement: '"'
+      state_class: measurement
       availability_topic: sfro/status
     - name: "SFRO Guide RMS Dec"
       unique_id: sfro_guide_rms_dec
       state_topic: sfro/guide
       value_template: "{{ value_json.rms_dec }}"
       unit_of_measurement: '"'
+      state_class: measurement
       availability_topic: sfro/status
     - name: "SFRO Guide Picco RA"
       unique_id: sfro_guide_peak_ra
       state_topic: sfro/guide
       value_template: "{{ value_json.peak_ra }}"
       unit_of_measurement: '"'
+      state_class: measurement
       availability_topic: sfro/status
     - name: "SFRO Guide Picco Dec"
       unique_id: sfro_guide_peak_dec
       state_topic: sfro/guide
       value_template: "{{ value_json.peak_dec }}"
       unit_of_measurement: '"'
+      state_class: measurement
       availability_topic: sfro/status
     - name: "SFRO Soggetto"
       unique_id: sfro_target
@@ -229,6 +238,94 @@ mqtt:
       device_class: current
       state_class: measurement
       availability_topic: sfro/status
+    # --- 2026-09-06: meteo di sito e stima condensa (topic sfro/meteo,
+    # pubblicato da sfro-mqtt ogni 10 min anche di giorno).
+    - name: "SFRO Temperatura esterna"
+      unique_id: sfro_meteo_temp
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.temp_c }}"
+      unit_of_measurement: '°C'
+      device_class: temperature
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Umidità esterna"
+      unique_id: sfro_meteo_hum
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.humidity_pct }}"
+      unit_of_measurement: '%'
+      device_class: humidity
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Punto di rugiada"
+      unique_id: sfro_meteo_dew
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.dewpoint_c }}"
+      unit_of_measurement: '°C'
+      device_class: temperature
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Temperatura cielo"
+      unique_id: sfro_meteo_sky
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.sky_temp_c }}"
+      unit_of_measurement: '°C'
+      device_class: temperature
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Vento"
+      unique_id: sfro_meteo_wind
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.wind_ms }}"
+      unit_of_measurement: 'm/s'
+      device_class: wind_speed
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Pioggia"
+      unique_id: sfro_meteo_rain
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.rain_mm_h }}"
+      unit_of_measurement: 'mm/h'
+      state_class: measurement
+      availability_topic: sfro/status
+    # I due margini sono DIFFERENZE di temperatura: NIENTE device_class
+    # temperature, altrimenti HA converte 3 °C in 37,4 °F.
+    - name: "SFRO Margine condensa"
+      unique_id: sfro_dew_margin
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.margin_c }}"
+      unit_of_measurement: '°C'
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Margine condensa minimo notte"
+      unique_id: sfro_dew_margin_min
+      state_topic: sfro/meteo
+      # a inizio notte il minimo non c'e' ancora (null): meglio non aggiornare
+      # affatto lo stato che scriverci dentro "None"
+      value_template: "{{ value_json.margin_min_c if value_json.margin_min_c is not none else '' }}"
+      unit_of_measurement: '°C'
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Minuti con condensa"
+      unique_id: sfro_dew_wet_minutes
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.wet_minutes }}"
+      unit_of_measurement: 'min'
+      device_class: duration
+      state_class: measurement
+      availability_topic: sfro/status
+    - name: "SFRO Verdetto condensa"
+      unique_id: sfro_dew_verdict
+      state_topic: sfro/meteo
+      value_template: "{{ value_json.verdict }}"
+      availability_topic: sfro/status
+    - name: "SFRO Attesa asciugatura"
+      unique_id: sfro_dew_dry_wait
+      state_topic: sfro/meteo
+      # vale solo dall'ingresso in asciugatura fino al reset di fine notte
+      value_template: "{{ value_json.dry_wait_min if value_json.dry_wait_min is not none else '' }}"
+      unit_of_measurement: 'min'
+      device_class: duration
+      availability_topic: sfro/status
   binary_sensor:
     - name: "SFRO Guida attiva"
       unique_id: sfro_guiding
@@ -335,6 +432,29 @@ mqtt:
       payload_off: "OFF"
       device_class: problem
       availability_topic: sfro/status
+    # --- 2026-09-06: stima condensa (sfro/meteo)
+    - name: "SFRO Condensa in atto"
+      unique_id: sfro_condensa
+      state_topic: sfro/meteo
+      value_template: "{{ 'ON' if value_json.condensa else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: moisture
+      availability_topic: sfro/status
+    - name: "SFRO Sotto zero (brina)"
+      unique_id: sfro_brina
+      state_topic: sfro/meteo
+      value_template: "{{ 'ON' if value_json.frost else 'OFF' }}"
+      payload_on: "ON"
+      payload_off: "OFF"
+      device_class: cold
+      availability_topic: sfro/status
+
+# NOTA (2026-09-06): in config.yaml la discovery e' DISATTIVATA
+# (mqtt.discovery: false) per non avere entita' doppie, quindi tutto quello
+# che sta qui va incollato davvero in HA, altrimenti i sensori non esistono.
+# Attenzione al blocco in cui si incolla: 'condensa' e 'frost' sono
+# binary_sensor (payload_on/payload_off non e' valido sotto 'sensor:').
 
 # --- Sensori DIRETTI (letti da HA, senza agente) ---
 binary_sensor:

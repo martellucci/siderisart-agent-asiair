@@ -32,7 +32,7 @@ class FakeTG:
 A.Telegram = FakeTG
 
 ROOF = "OPEN"
-A.http_get_json = lambda url, http: {}
+A.http_get_json = lambda url, http, session=None: {}
 A.parse_alpaca = lambda data: ROOF
 
 # KASA: prese SPENTE, cosi' il ramo T-10 deve accenderle davvero

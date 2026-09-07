@@ -55,8 +55,18 @@ le stesse serate perse.
   **notte nautica**, calcolata dalle coordinate dell'osservatorio.
 - Accende l'anti-condensa della camera e la fascia anticondensa, apre il flat
   panel motorizzato, **avvia il piano**.
-- Ogni 5 minuti: controlla che la ripresa proceda, **sincronizza i FITS** sul NAS
-  in modo incrementale, aggiorna il diario.
+- Ogni 3 minuti: controlla che la ripresa proceda, aggiorna il diario e ogni 15
+  minuti **sincronizza i FITS** sul NAS in modo incrementale (i punti fissi —
+  fine piano, meteo, flat, spegnimento — sincronizzano comunque).
+- **Sorveglia il progresso vero**: non il flag "piano avviato", che resta acceso
+  anche a piano fermo, ma il **residuo del piano**. Se non scende per 20 minuti
+  avvisa su Telegram. È solo un avviso: una ripresa in corso non si tocca mai.
+- **Se le prese sono accese ma l'ASIAIR tace**, a inizio notte toglie e ridà
+  corrente alla **sola** presa dell'ASIAIR, per 30 secondi, una volta sola per
+  notte — il caso dello shutdown fatto dall'app lasciando la corrente attaccata,
+  che lascia il box morto ma alimentato e irraggiungibile.
+- **Misura la condensa** ogni 6 minuti a tetto aperto, per decidere all'alba
+  quanto aspettare prima dei flat (sotto).
 - **Chiusura meteo = pausa, non fine**: ferma il piano, parcheggia, chiude il
   pannello, ma tiene il cooler acceso e non azzera niente. Quando il tetto
   riapre, **il piano riparte da solo dal punto in cui si era interrotto**.
@@ -64,8 +74,9 @@ le stesse serate perse.
 **All'alba**
 
 - Ferma il piano, parcheggia, resetta il piano per la notte dopo.
-- Fascia anticondensa al massimo e **30 minuti di asciugatura** prima di
-  qualsiasi flat (la condensa sul pannello rovina i flat, e non te ne accorgi).
+- Fascia anticondensa al massimo e **asciugatura prima di qualsiasi flat** — da 5
+  a 30 minuti secondo la condensa misurata durante la notte (sotto). La condensa
+  sul pannello rovina i flat, e non te ne accorgi.
 - **Flat automatici per (filtro, gain) effettivamente usati quella notte**:
   legge dal diario quali filtri hai ripreso e con che gain, raggruppa, imposta
   la luminosità del pannello per gruppo e lancia un autorun per ciascuno con
@@ -79,13 +90,72 @@ le stesse serate perse.
 
 - **Bot Telegram** con menu a bottoni: stato, avvio, avvio piano, sync manuale,
   flat/dark a comando, spegnimento — tutte le operazioni pericolose con conferma.
-- **Telemetria MQTT** verso Home Assistant: ~50 entità fra guida (RMS e picchi
+- **Telemetria MQTT** verso Home Assistant: ~60 entità fra guida (RMS e picchi
   su finestra mobile), camera, fuoco, montatura, storage, temperatura CPU del
-  box e assorbimento per singola presa.
+  box, assorbimento per singola presa e stazione meteo di sito con la stima
+  della condensa.
 - **Diario automatico**: legge gli header FITS, li mette in SQLite, aggiorna un
   Google Sheet con gli aggregati, scrive il dettaglio per notte in CSV.
 - **Dashboard HTML** autonoma con le statistiche: ore per soggetto e filtro,
   resa sul buio disponibile, RMS di guida e HFR per notte, istogrammi.
+
+---
+
+## La condensa: misurata, non indovinata
+
+L'attesa di asciugatura prima dei flat era una costante cieca. Ma ogni minuto di
+attesa in più è un minuto di **dark fatti con più luce ambiente**: all'alba
+nautica mancano meno di 50 minuti al sorgere del Sole, e il crepuscolo civile
+arriva prima. Da qui l'idea di misurare invece di indovinare.
+
+La condensa si forma quando una superficie scende sotto il punto di rugiada, e
+una superficie non riscaldata **non è alla temperatura dell'aria**: irradia verso
+il cielo e si raffredda, tanto più quanto il cielo è sereno e l'aria è ferma.
+Quindi:
+
+```
+margine = (temperatura − punto di rugiada) − raffreddamento radiativo stimato
+```
+
+Il raffreddamento si stima dalla **depressione del cielo** (`temperatura aria −
+temperatura cielo`, che una stazione meteo con sensore IR riporta) e dal
+**vento**: circa 5 °C con cielo sereno e calmo, 3 °C se sereno e ventoso o
+velato, 1 °C con cielo coperto — e **5 °C anche a cielo ignoto**, cioè il caso
+peggiore. Margine ≤ 0 significa condensa in atto. Sotto zero è **brina**, non
+rugiada: il punto di brinamento è più alto di quello di rugiada, quindi si toglie
+un altro grado di prudenza.
+
+**La misura è di tutta la notte, non dell'alba**: se il margine è crollato alle
+03:00, la condensa alle 06:00 c'è ancora. L'agente campiona ogni 6 minuti, ma
+**solo in notte e a tetto aperto** (a tetto chiuso l'ottica non vede il cielo e
+non irradia), e tiene margine minimo, minuti bagnati, pioggia e numero di letture.
+
+All'alba il verdetto sceglie **quanto aspettare**:
+
+| Banda | Attesa | Quando |
+|---|---|---|
+| **SECCA** | 5 min | margine minimo *e* attuale ampi, niente pioggia, nessuna chiusura del tetto, copertura piena della notte |
+| **INTERMEDIA** | 10 min | notte misurata per intero e mai bagnata, ma senza il margine che certifica la banda secca |
+| **NORMALE** | 20 min | **caso cieco**: stazione giù, dati vecchi o pochi, oppure notte con chiusura meteo (a tetto chiuso non si campiona e non si sa cosa sia successo fuori) |
+| **UMIDA** | 30 min | condensa vista davvero, o pioggia |
+
+L'asimmetria è voluta: **per allungare l'attesa basta un indizio, per accorciarla
+serve l'unanimità.** La banda intermedia esiste perché *«non certificabile come
+asciutta»* non è la stessa cosa di *«non ne so niente»*: una notte misurata da
+capo a fondo senza mai vedere condensa è un'informazione, e merita meno dei 20
+minuti pensati per quando siamo ciechi. Vale anche l'argomento fisico: il
+raffreddamento del caso peggiore è tarato su una superficie che vede tutto il
+cielo, mentre un'ottica dentro un capannone ne vede solo una parte.
+
+Il verdetto si calcola **una volta sola**, quando comincia l'asciugatura, così
+countdown e controllo finale leggono lo stesso numero e non possono divergere a
+metà attesa. Tutto è disattivabile (`dew.enabled: false`), e c'è una **modalità
+osservazione** (`dew.adaptive: false`) che misura e pubblica su MQTT ma lascia
+l'attesa fissa: il modo onesto di guardarsi i dati per qualche settimana prima di
+lasciargli cambiare i tempi.
+
+Serve una stazione meteo interrogabile — qui è quella del sito, esposta sulla
+stessa API Alpaca del tetto. Senza, l'agente resta sul valore fisso.
 
 ---
 
@@ -96,7 +166,7 @@ le stesse serate perse.
                  │  API tetto  │◄──────────────────┤              │
                  └─────────────┘                   │              │
                  ┌─────────────┐   cloud TP-Link   │   AGENTE     │
-                 │ prese Kasa  │◄──────────────────┤  (ogni 5')   │
+                 │ prese Kasa  │◄──────────────────┤  (ogni 3')   │
                  └─────────────┘                   │              │
                  ┌─────────────┐   JSON-RPC 4700   │  macchina    │
                  │   ASIAIR    │◄──────────────────┤  a stati     │
@@ -116,7 +186,7 @@ le stesse serate perse.
 
 | File | Ruolo |
 |---|---|
-| `sfro_agent.py` | L'agente. Timer systemd **oneshot ogni 5 minuti**: nessun demone che può morire in silenzio, ogni ciclo riparte da zero leggendo lo stato da disco. Orchestrazione della notte, teardown, flusso flat/dark, sync. |
+| `sfro_agent.py` | L'agente. Timer systemd **oneshot ogni 3 minuti**: nessun demone che può morire in silenzio, ogni ciclo riparte da zero leggendo lo stato da disco. Orchestrazione della notte, teardown, flusso flat/dark, sync. |
 | `sfro_mqtt.py` | Servizio persistente: telemetria verso MQTT/Home Assistant, ascolto degli eventi push dell'ASIAIR, sink JSONL di guida e autofocus. |
 | `sfro_telegram.py` | Servizio persistente: bot con menu a bottoni e conferme. |
 | `sfro_sessionlog.py` | Diario: FITS → SQLite → Google Sheet + CSV. |
@@ -140,7 +210,8 @@ da rompere — e se si impianta, il timer successivo riparte comunque.
 - **Opzionali**: prese smart TP-Link Kasa (accensione/spegnimento del rig),
   un broker MQTT e Home Assistant (telemetria), un bot Telegram (notifiche e
   comandi), un NAS o un disco per i FITS, un service account Google (diario su
-  Sheets), Apache o qualsiasi web server (dashboard).
+  Sheets), Apache o qualsiasi web server (dashboard), una stazione meteo
+  interrogabile via ASCOM Alpaca (asciugatura adattiva pre-flat).
 - Un **tetto o cupola con API ASCOM Alpaca** se vuoi la logica di apertura
   automatica. Senza, l'agente funziona lo stesso: consideri il tetto sempre
   aperto e ti tieni l'automazione del resto.
@@ -215,7 +286,9 @@ Questo è il valore vero del progetto. Ogni riga qui sotto è una serata persa.
 | Trappola | Cosa succede | Rimedio nel codice |
 |---|---|---|
 | **`value: 0` sul flat panel** | Il firmware interpreta lo 0 come `state:false` e il pannello **si APRE** invece di spegnersi. | "Chiuso e spento" = `value:5, state:true`. Mai zero su un'uscita PWM. |
-| **`is_plan_started` mente** | Resta `true` anche dopo che il piano è stato fermato: non significa "sta riprendendo adesso". | Per dire "sta riprendendo" servono `plan_started` **e** `capturing`. |
+| **`is_plan_started` mente** | Resta `true` anche dopo che il piano è stato fermato: non significa "sta riprendendo adesso". | Per dire "sta riprendendo" servono `plan_started` **e** `capturing` (o l'attesa programmata prima del primo scatto). A inizio notte un flag sporco non fa adottare un piano fermo: si resetta e si riavvia. |
+| **Un watchdog conta anche il tempo in cui non guardava** | L'allarme "il piano non avanza da N minuti" scattava **subito dopo la riapertura del tetto**: durante la pausa meteo il residuo resta fermo per costruzione e il watchdog non gira, così al ritorno trovava il residuo invariato e ci sottraeva un timestamp di prima della chiusura. | Il watchdog misura **solo i minuti in cui ha davvero sorvegliato**: se fra due passaggi c'è un buco (pausa meteo, agente fermo, VPN giù) riparte da zero. Vale per qualsiasi allarme del tipo "X non cambia da N minuti". |
+| **Prese accese, box morto** | Uno `shutdown` dall'app lasciando la corrente attaccata lascia l'ASIAIR **alimentato ma halted**: non risponde e non c'è modo di riaccenderlo da remoto. Una notte persa senza nessun guasto. | Ciclo di corrente automatico a inizio notte, sulla **sola** presa dell'ASIAIR, e solo se la VPN risulta su (altrimenti il silenzio non prova niente). Un tentativo per notte; la montatura non si spegne mai. |
 | **Un piano interrotto non riparte** | `start_exposure` su un piano a metà non fa nulla di utile: va **resettato** prima. | `reset_plan()` con verifica su `get_plan` (lapsed 0, left == total). |
 | **Il ping non basta per spegnere** | Il Pi risponde al ping mentre il sistema è già morto: staccare la corrente lì corrompe la SD; non staccarla lascia il rig acceso. | Controllo a due livelli: ping **e** porta 4700. Se l'app è giù ma il ping vive, 90 secondi di grazia e poi corrente via comunque. |
 | **Float del firmware** | Scrivi una posa di `8.19` s, la rileggi come `8.190001` e il confronto esatto fallisce. | Pose arrotondate a 1 decimale e confronto con tolleranza di 5 ms. |
@@ -229,7 +302,7 @@ Questo è il valore vero del progetto. Ogni riga qui sotto è una serata persa.
 
 ## Test
 
-Dodici script di test **completamente offline**: niente rig, niente rete,
+Venti script di test **completamente offline**: niente rig, niente rete,
 niente NAS. Usano finti ASIAIR, finti Google Sheet in memoria e sandbox
 temporanee, e coprono i guasti veri che hanno generato le contromisure qui
 sopra.

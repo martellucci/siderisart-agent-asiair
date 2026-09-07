@@ -54,14 +54,18 @@ import sfro_agent as A
 HERE = Path(__file__).resolve().parent
 log = A.log
 
+# DISPOSIZIONE (richiesta utente 2026-08-17): le coppie stanno sulla stessa
+# riga per affinita' — accensione/spegnimento, avvio/stop dei flat, piano/sync
+# — e lo Status, l'unica voce sempre disponibile e mai distruttiva, sta da solo
+# in fondo.
 MENU_KB = [
-    [{"text": "\U0001F4CA Status", "callback_data": "m:status"},
-     {"text": "\U0001F680 Start", "callback_data": "m:start"}],
-    [{"text": "▶️ Go Plan", "callback_data": "m:goplan"},
+    [{"text": "\U0001F680 Start", "callback_data": "m:start"},
      {"text": "\U0001F534 Shutdown", "callback_data": "m:shutdown"}],
-    [{"text": "\U0001F4BE Rsync", "callback_data": "m:rsync"},
-     {"text": "\U0001F312 Flat/Dark", "callback_data": "m:flatdark"}],
-    [{"text": "\U0001F6D1 Stop Flat", "callback_data": "m:stopflat"}],
+    [{"text": "\U0001F312 Flat/Dark", "callback_data": "m:flatdark"},
+     {"text": "\U0001F6D1 Stop Flat", "callback_data": "m:stopflat"}],
+    [{"text": "▶️ Go Plan", "callback_data": "m:goplan"},
+     {"text": "\U0001F4BE Rsync", "callback_data": "m:rsync"}],
+    [{"text": "\U0001F4CA Status", "callback_data": "m:status"}],
 ]
 
 CONFIRM_TEXT = {"start": "🚀 Stai per avviare ASIAIR, confermi?",
@@ -650,16 +654,21 @@ class SfroBot:
         if not okh:
             self.send(f"⚠️ Fascia anticondensa NON impostata al {hv}% ({deth}): "
                       "proseguo comunque.", thread=th)
+        # i minuti veri li decide l'AGENTE quando prende in carico la richiesta
+        # (attesa adattiva sulla condensa stimata, 2026-09-06): qui si annuncia
+        # il valore standard, l'agente scrive poi il suo con il perche'
         dry = int(self.ff.get("dry_wait_minutes", 30))
         self.send(f"✅ Richiesta presa in consegna dall'agente (entro 3 min).\n"
-                  f"⏳ Asciugatura {dry} min a pannello chiuso"
+                  f"⏳ Asciugatura ~{dry} min a pannello chiuso (l'agente la "
+                  f"adatta alla condensa stimata)"
                   + (f", fascia anticondensa al {hv}%" if okh else "")
                   + ", poi flat e dark dei filtri di stanotte e sync sul NAS.\n"
                   "A fine processo ti chiederò se spegnere tutto.", thread=th)
 
     def do_stopflat(self, th):
         """Bottone Stop Flat (richiesta utente 2026-08-15): interrompe l'ATTESA
-        dei 30 minuti tra la fine del piano e i flat. Niente flat né dark: il
+        di asciugatura (dry_wait_minutes) tra la fine del piano e i flat.
+        Niente flat né dark: il
         rig resta com'è e torna in carico all'utente (il promemoria periodico
         di spegnere continua ad arrivare).
         Qui non si comanda NULLA all'ASIAIR — si scrive solo la richiesta per

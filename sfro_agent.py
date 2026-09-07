@@ -137,11 +137,15 @@ def save_state(path: Path, state: dict) -> None:
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
-def http_get_json(url: str, http_cfg: dict):
+def http_get_json(url: str, http_cfg: dict, session=None):
+    """`session`: requests.Session opzionale (2026-09-06). Serve alla stazione
+    meteo, che va letta una proprieta' per volta: con la Session si paga UN solo
+    handshake TLS invece di sei."""
     last = None
+    getter = session or requests
     for i in range(http_cfg.get("retries", 2) + 1):
         try:
-            r = requests.get(url, timeout=http_cfg.get("timeout_seconds", 15))
+            r = getter.get(url, timeout=http_cfg.get("timeout_seconds", 15))
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -173,6 +177,244 @@ def parse_alpaca(data) -> str:
     if v is False:
         return "CLOSED"
     return "UNKNOWN"
+
+
+# --------------------------------------------------------------------------- #
+# Stazione meteo di sito e stima della CONDENSA (2026-09-06)
+#
+# La stessa API Alpaca del tetto espone anche la stazione meteo SFRO:
+#   GET {alpaca_base}/api/v1/observingconditions/1/{proprieta'}
+# Pubblica, HTTPS, senza VPN. 'cloudcover' e 'skyquality' sono "not implemented":
+# la copertura nuvolosa si ricava da skytemperature, che serve comunque.
+#
+# FISICA. La condensa si forma quando una superficie scende sotto il punto di
+# rugiada dell'aria. La superficie NON e' alla temperatura dell'aria: irradia
+# verso il cielo e si raffredda sotto di essa, tanto piu' quanto piu' il cielo e'
+# sereno (skytemperature bassa) e l'aria e' ferma. Quindi:
+#     margine = (T_aria - T_rugiada) - k(cielo, vento)
+# con k = raffreddamento radiativo stimato delle superfici NON riscaldate — che
+# e' il caso del pannello OF2: la fascia anticondensa scalda il correttore, non
+# il diffusore bianco del pannello, che e' proprio cio' che l'attesa asciuga.
+# margine <= 0  ->  condensa in atto.
+#
+# BRINA: e' condensa che congela, e riguarda solo T superficiale <= 0. Sotto zero
+# il vapore si deposita direttamente come ghiaccio e la soglia utile e' il punto
+# di BRINAMENTO, che a parita' di vapore e' PIU' ALTO del punto di rugiada (la
+# stazione riporta quest'ultimo, calcolato sull'acqua). Per questo sotto zero al
+# margine si toglie 'frost_margin_c': la stessa lettura e' piu' pericolosa.
+# --------------------------------------------------------------------------- #
+WEATHER_PROPS = {"temperature": "temp_c", "humidity": "humidity_pct",
+                 "dewpoint": "dewpoint_c", "skytemperature": "sky_temp_c",
+                 "windspeed": "wind_ms", "rainrate": "rain_mm_h"}
+
+
+def alpaca_weather_url(roof_cfg: dict, device_number, prop: str) -> str:
+    base = roof_cfg["alpaca_base"].rstrip("/")
+    return f"{base}/api/v1/observingconditions/{device_number}/{prop}"
+
+
+def _alpaca_value(data):
+    """Valore numerico di una risposta Alpaca, None se assente o in errore
+    (le proprieta' non implementate tornano ErrorNumber 1024)."""
+    if not isinstance(data, dict) or data.get("ErrorNumber", 0) not in (0, None):
+        return None
+    v = data.get("Value")
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def read_weather(roof_cfg: dict, dew_cfg: dict):
+    """Un campione della stazione meteo, o None se non utilizzabile.
+
+    Timeout e retry SUOI, non quelli globali: con {timeout 15, retries 2} una
+    stazione lenta bloccherebbe il ciclo dell'agente per un minuto e mezzo.
+    Controlli di sanita': una lettura assurda vale quanto una lettura mancante,
+    e in entrambi i casi si ricade sull'attesa fissa."""
+    hc = {"timeout_seconds": float(dew_cfg.get("timeout_seconds", 5)),
+          "retries": int(dew_cfg.get("retries", 0)), "retry_backoff_seconds": 1}
+    dev = dew_cfg.get("device_number", 1)
+    w, sess = {}, None
+    try:
+        sess = requests.Session()
+    except Exception:
+        sess = None
+    try:
+        for prop, key in WEATHER_PROPS.items():
+            w[key] = _alpaca_value(http_get_json(
+                alpaca_weather_url(roof_cfg, dev, prop), hc, session=sess))
+    finally:
+        if sess is not None:
+            try:
+                sess.close()
+            except Exception:
+                pass
+    t, td = w.get("temp_c"), w.get("dewpoint_c")
+    if t is None or td is None:
+        return None
+    if not (-40 <= t <= 60) or not (-60 <= td <= 60) or td > t + 0.5:
+        log.warning("Meteo: campione fuori scala (T=%s Td=%s), ignorato", t, td)
+        return None
+    if w.get("humidity_pct") is not None and not (0 <= w["humidity_pct"] <= 100):
+        w["humidity_pct"] = None
+    if w.get("sky_temp_c") is not None and not (-90 <= w["sky_temp_c"] <= 60):
+        w["sky_temp_c"] = None
+    return w
+
+
+def dew_margin(w: dict, dew_cfg: dict) -> dict:
+    """Aggiunge al campione margine, raffreddamento stimato e stato di condensa."""
+    t, td = w["temp_c"], w["dewpoint_c"]
+    sky, wind = w.get("sky_temp_c"), w.get("wind_ms")
+    spread = t - td
+    dep = None if sky is None else t - sky
+    windy = wind is not None and wind >= float(dew_cfg.get("wind_calm_ms", 2))
+    if dep is None:
+        # cielo ignoto -> si assume il caso PEGGIORE (sereno e aria ferma):
+        # sbagliare qui deve portare ad aspettare di piu', mai di meno
+        k = float(dew_cfg.get("k_clear_calm", 5))
+    elif dep >= float(dew_cfg.get("sky_clear_depression", 15)):
+        k = float(dew_cfg.get("k_clear_windy", 3) if windy
+                  else dew_cfg.get("k_clear_calm", 5))
+    elif dep >= float(dew_cfg.get("sky_partly_depression", 5)):
+        k = float(dew_cfg.get("k_partly", 3))
+    else:
+        k = float(dew_cfg.get("k_cloudy", 1))
+    margin = spread - k
+    frost = (t - k) <= 0
+    if frost:
+        margin -= float(dew_cfg.get("frost_margin_c", 1))
+    w = dict(w, spread_c=round(spread, 1), sky_depression_c=None if dep is None else round(dep, 1),
+             cooling_k=k, margin_c=round(margin, 1), frost=frost,
+             condensa=margin <= float(dew_cfg.get("margin_wet", 0)))
+    return w
+
+
+def dew_sample(state: dict, cfg: dict, now: datetime) -> dict:
+    """Campiona la stazione e accumula le statistiche della notte in `state`.
+
+    Cadenza `sample_interval_minutes`. I minuti "bagnati" si contano solo
+    mentre si campiona, cioe' a TETTO APERTO: a tetto chiuso l'ottica non vede
+    il cielo, non irradia e la condensa non si forma."""
+    d = cfg.get("dew", {}) or {}
+    if not d.get("enabled", False):
+        return {}
+    every = float(d.get("sample_interval_minutes", 6)) * 60
+    last_ts = state.get("dew_sample_ts")
+    if last_ts:
+        gap = (now - datetime.fromisoformat(last_ts)).total_seconds()
+        if gap < every:
+            return state.get("dew_last") or {}
+    else:
+        gap = every
+    w = read_weather(cfg["roof"], d)
+    state["dew_sample_ts"] = now.isoformat()
+    if not w:
+        state["dew_fail"] = int(state.get("dew_fail", 0)) + 1
+        return {}
+    state["dew_fail"] = 0
+    w = dew_margin(w, d)
+    w["ts"] = now.isoformat()
+    state["dew_last"] = w
+    state["dew_samples"] = int(state.get("dew_samples", 0)) + 1
+    if not state.get("dew_first_ts"):
+        state["dew_first_ts"] = now.isoformat()
+    mmin = state.get("dew_margin_min")
+    if mmin is None or w["margin_c"] < mmin:
+        state["dew_margin_min"] = w["margin_c"]
+        state["dew_margin_min_ts"] = now.isoformat()
+    if w.get("rain_mm_h"):
+        state["dew_rain"] = True
+    if w["condensa"]:
+        # il campione vale per l'intervallo appena trascorso, non oltre
+        state["dew_wet_minutes"] = round(
+            float(state.get("dew_wet_minutes", 0)) + min(gap, every * 2) / 60, 1)
+        state["dew_wet_ts"] = now.isoformat()
+    return w
+
+
+def dew_verdict(state: dict, cfg: dict, now: datetime) -> tuple:
+    """(verdetto, minuti di asciugatura, motivo).
+
+    Quattro bande: SECCA 5', INTERMEDIA 10', NORMALE 20', UMIDA 30' (i 30' erano
+    il valore pre-2026-08-19, gia' validato sul campo).
+    ASIMMETRIA voluta: per allungare basta un indizio, per accorciare serve
+    l'unanimita' — margine minimo di TUTTA la notte comodo, margine comodo anche
+    adesso, niente pioggia, niente chiusura meteo e abbastanza campioni.
+
+    INTERMEDIA (2026-09-07, richiesta utente). La banda SECCA pretende un
+    margine di 3°C SOPRA un raffreddamento gia' stimato al caso peggiore
+    (k=5 = superficie che vede tutto il cielo): due prudenze sommate, che a
+    questo sito chiedono ~8°C di spread e quindi non scattano quasi mai. Ma
+    "non abbastanza asciutta per certificarla" non e' la stessa cosa di
+    "non ne so niente": una notte MISURATA per intero, senza pioggia, senza
+    chiusura del tetto e con il margine mai sceso a zero e' un'informazione, e
+    merita meno dei 20' pensati per il caso in cui siamo ciechi. Nota che il
+    k=5 e' tarato su una superficie a cielo libero, mentre qui l'ottica sta in
+    un capannone i cui muri coprono parte dell'emisfero: il raffreddamento vero
+    e' probabilmente minore, e questa banda e' il modo prudente di tenerne conto
+    senza inventarsi un k che non abbiamo ancora misurato.
+    NORMALE resta la banda dei casi CIECHI: dati assenti, vecchi, pochi, o notte
+    con chiusura meteo (a tetto chiuso non si campiona e non si sa cosa sia
+    successo fuori)."""
+    ff = cfg.get("flat_flow", {}) or {}
+    d = cfg.get("dew", {}) or {}
+    base = float(ff.get("dry_wait_minutes", 20))
+    if not d.get("enabled", False):
+        return "NORMALE", base, "stima condensa disattivata"
+    last = state.get("dew_last") or {}
+    mnow = last.get("margin_c")
+    n = int(state.get("dew_samples", 0))
+    wet = float(state.get("dew_wet_minutes", 0) or 0)
+    mmin = state.get("dew_margin_min")
+    wet_thr = float(d.get("margin_wet", 0))
+    dry_thr = float(d.get("margin_dry", 3))
+    # dato vecchio = dato assente: non si decide su una lettura di tre ore fa
+    fresh = False
+    if last.get("ts"):
+        age = (now - datetime.fromisoformat(last["ts"])).total_seconds() / 60
+        fresh = age <= float(d.get("max_age_minutes", 30))
+
+    def out(verdetto, minuti, motivo):
+        # 'adaptive: false' = tutto misurato e pubblicato, nulla deciso
+        if not d.get("adaptive", False):
+            return "NORMALE", base, f"{motivo} — stima IN OSSERVAZIONE ({verdetto})"
+        return verdetto, minuti, motivo
+
+    if n == 0 or not fresh:
+        return "NORMALE", base, ("nessun dato meteo" if n == 0
+                                 else "dato meteo non aggiornato")
+    if wet > 0 or state.get("dew_rain") or (mnow is not None and mnow <= wet_thr):
+        why = ("pioggia in notte" if state.get("dew_rain") else
+               f"{int(wet)} min con condensa (min {mmin}°C)" if wet > 0 else
+               f"condensa in atto ora ({mnow}°C)")
+        return out("UMIDA", float(ff.get("dry_wait_wet_minutes", 30)), why)
+    if (mmin is not None and mnow is not None and mmin >= dry_thr and mnow >= dry_thr
+            and n >= int(d.get("min_samples", 20))
+            and not state.get("dew_blocked")):
+        return out("SECCA", float(ff.get("dry_wait_dry_minutes", 5)),
+                   f"margine sempre ≥ {dry_thr:g}°C (min {mmin}°C su {n} letture)")
+    # notte misurata per intero e mai bagnata: meno dei 20' del caso cieco.
+    # Arrivare fin qui implica gia' wet == 0, niente pioggia e margine attuale
+    # sopra la soglia bagnato (i rami UMIDA sono tutti sopra).
+    if n >= int(d.get("min_samples", 20)) and not state.get("dew_blocked"):
+        return out("INTERMEDIA", float(ff.get("dry_wait_mid_minutes", 10)),
+                   f"notte intera senza condensa (min {mmin}°C su {n} letture)")
+    why = (f"pochi dati ({n} letture)" if n < int(d.get("min_samples", 20)) else
+           "notte con chiusura meteo" if state.get("dew_blocked") else
+           f"margine minimo {mmin}°C")
+    return out("NORMALE", base, why)
+
+
+def dew_text(state: dict, verdetto: str, minuti: float, motivo: str) -> str:
+    """Riga di riepilogo per Telegram."""
+    last = state.get("dew_last") or {}
+    icona = {"SECCA": "🌵", "INTERMEDIA": "🌤", "UMIDA": "💧"}.get(verdetto, "🌫")
+    ora = (f" · ora {last['margin_c']:+.1f}°C" if last.get("margin_c") is not None else "")
+    meteo = ""
+    if last.get("temp_c") is not None:
+        meteo = (f"\n   {last['temp_c']:.1f}°C, rugiada {last['dewpoint_c']:.1f}°C"
+                 + (f", UR {last['humidity_pct']:.0f}%" if last.get("humidity_pct") is not None else "")
+                 + (f", cielo {last['sky_temp_c']:.1f}°C" if last.get("sky_temp_c") is not None else ""))
+    return f"{icona} Condensa: notte {verdetto} ({motivo}){ora} → asciugatura {int(minuti)} min.{meteo}"
 
 
 # --------------------------------------------------------------------------- #
@@ -660,6 +902,9 @@ class AsiairControl:
                     if o2 is None or bool(o2.get("state")):
                         return False, "flat panel ancora CHIUSO dopo l'apertura"
             c.call("set_page", ["plan"], max_wait=self.timeout)
+            # Il flag di avvio PRIMA del comando: serve alla verifica qui sotto.
+            b, _ = c.call("get_enabled_plan", [], max_wait=self.timeout)
+            flag_before = any(p.get("is_plan_started") for p in (b.get("result") or []))
             # AVVIO PIANO: l'app chiama start_exposure CON ["light"] (NON params vuoti):
             # avvia l'autorun del piano attivo (le light). Con [] non parte l'autorun.
             r, _ = c.call("start_exposure", ["light"], max_wait=self.timeout)
@@ -668,17 +913,31 @@ class AsiairControl:
             # VERIFICA reale via get_enabled_plan -> is_plan_started:true (il flag che
             # usa l'app; affidabile anche col FirstDelay, dove is_working è ingannevole).
             # start_exposure torna code 0 anche se il piano è concluso/vuoto e NON parte.
+            # 2026-08-27: se il flag era GIA' alto prima del comando (resta sporco dopo
+            # uno stop o un reset non riuscito) la sua presenza non prova niente — in
+            # quel caso serve il lavoro VERO della camera: is_working, oppure il
+            # FirstDelay, che e' attesa programmata del piano.
             started = False
-            for _ in range(6):
+            for _ in range(10):
                 time.sleep(1)
                 a, _ = c.call("get_enabled_plan", [], max_wait=self.timeout)
-                if any(p.get("is_plan_started") for p in (a.get("result") or [])):
+                if not any(p.get("is_plan_started") for p in (a.get("result") or [])):
+                    continue
+                if not flag_before:
+                    started = True
+                    break
+                s, _ = c.call("get_app_state", [], max_wait=self.timeout)
+                sres = s.get("result")
+                cap = sres.get("capture", {}) if isinstance(sres, dict) else {}
+                if bool(cap.get("is_working")) or cap.get("state") == "first_delay":
                     started = True
                     break
             if not started:
-                return False, ("start_exposure OK ma il piano NON risulta avviato "
-                               "(is_plan_started=false): piano concluso/senza light "
-                               "attivi → controlla/RESETTA il piano sull'ASIAIR")
+                return False, ("start_exposure OK ma il piano NON risulta avviato"
+                               + (" (flag di avvio gia' alto e camera ferma)"
+                                  if flag_before else " (is_plan_started=false)")
+                               + ": piano concluso/senza light attivi → "
+                                 "controlla/RESETTA il piano sull'ASIAIR")
         # ok: il detail riporta l'esito del pre-avvio (anti-dew + fascia
         # anticondensa)
         return True, prep_txt
@@ -1929,10 +2188,40 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
     in_night, n_start, n_end, night_id = nautical_window(now, cfg["location"], tz, depression)
     roof = parse_alpaca(http_get_json(alpaca_issafe_url(cfg["roof"]), http_cfg))
 
+    # CAMPIONE METEO per la stima della condensa (2026-09-06): solo quando la
+    # condensa puo' davvero formarsi (notte a tetto APERTO) e durante
+    # l'asciugatura, dove serve il margine ATTUALE. Un fallimento della
+    # stazione non ha conseguenze: si ricade sull'attesa fissa.
+    if (in_night and roof == "OPEN") or state.get("flat_stage") == "drying":
+        try:
+            dew_sample(state, cfg, now)
+        except Exception as e:
+            log.warning("Campione meteo non riuscito: %s", e)
+
     ac = AsiairControl(cfg.get("asiair", {}))
     acfg = cfg.get("asiair", {})
     sc = cfg.get("sync_module", {})
     ff = cfg.get("flat_flow", {}) or {}
+
+    def dry_wait_set() -> str:
+        """Fissa l'attesa di asciugatura all'INGRESSO in 'drying' e la scrive in
+        stato (2026-09-06). Si decide UNA volta sola: countdown e gate leggono
+        lo stesso numero e non possono divergere a meta' attesa. Ritorna la riga
+        di riepilogo per Telegram."""
+        verdetto, minuti, motivo = dew_verdict(state, cfg, now)
+        state["dry_wait_effective"] = minuti
+        state["dew_verdict"] = verdetto
+        state["dew_motivo"] = motivo
+        return dew_text(state, verdetto, minuti, motivo)
+
+    def dry_wait_min() -> float:
+        """Minuti di asciugatura in corso. Il default di config e' il fallback
+        per uno stato scritto da una versione precedente."""
+        try:
+            return float(state.get("dry_wait_effective")
+                         or ff.get("dry_wait_minutes", 20))
+        except (TypeError, ValueError):
+            return float(ff.get("dry_wait_minutes", 20))
 
     # Marker di SHUTDOWN MANUALE (bot Telegram /sfro): se lo shutdown e' avvenuto
     # DOPO l'inizio della notte corrente, l'agente NON riaccende il rig per il
@@ -2067,6 +2356,11 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 p = SL.push(cfg)
                 if p.get("error"):
                     raise RuntimeError(p["error"])
+                # piani di acquisizione riletti da Drive una volta a notte, qui
+                # a fine notte: e' l'unico punto in cui la dashboard puo'
+                # permettersi una chiamata di rete (scelta utente 2026-09-03).
+                # Un piano gia' al 100% non viene riscaricato.
+                SL.sync_piani(cfg)
                 # dashboard statistiche rigenerata a fine notte (best-effort)
                 rep = SL.build_report(cfg)
                 url = (cfg.get("report", {}) or {}).get("url", "")
@@ -2094,13 +2388,22 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             okr, detr = ac.reset_plan()
             if okr:
                 txt += f"\n🔁 Piano resettato per stasera ({detr})."
+                state.pop("plan_reset_failed", None)
             else:
                 txt += (f"\n⚠️ RESET del piano NON riuscito ({detr}): "
                         "resettalo dall'app prima di stasera.")
                 log.error("Reset piano fallito: %s", detr)
+                # RITENTO ALLA PROSSIMA ACCENSIONE (2026-08-27): il 26/8 questo
+                # reset e' fallito su un rig gia' morto ("No route to host") e il
+                # piano e' rimasto marcato "avviato", facendo perdere la notte
+                # dopo. Un solo tentativo all'alba non basta: la marca resta in
+                # stato (NON e' nel reset di inizio notte) e startup_rig riprova.
+                state["plan_reset_failed"] = now.isoformat()
         if ff_next:
+            # attesa di asciugatura ADATTIVA sulla condensa stimata (2026-09-06)
+            dew_line = dry_wait_set()
             txt += ("\n🧊 Cooler MANTENUTO per i flat — asciugatura pannello "
-                    f"{int(ff.get('dry_wait_minutes', 25))} min, poi autorun flat.")
+                    f"{int(dry_wait_min())} min, poi autorun flat.\n" + dew_line)
             # fascia anticondensa (uscita dew_heater) al massimo PRIMA del
             # timer di asciugatura (richiesta utente 2026-07-09); errore non
             # bloccante
@@ -2124,7 +2427,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 # subito dopo lo storico, poi uno per ciclo in flat_flow_cycle.
                 # I minuti residui sono calcolati sull'orologio REALE: il sync
                 # finale sopra puo' aver gia' consumato parte dell'attesa.
-                rem_s = (float(ff.get("dry_wait_minutes", 25)) * 60
+                rem_s = (dry_wait_min() * 60
                          - (datetime.now(tz) - now).total_seconds())
                 rem_m = max(1, int((rem_s + 59) // 60))
                 notify(f"⏳ Attesa Flats -{rem_m} minuti")
@@ -2151,6 +2454,17 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         state["imaging_active"] = False
         state["teardown_done"] = True     # blocca l'avvio generico: riparte solo il recupero
         state["weather_closed"] = True
+        # WATCHDOG STALLO: il tempo di pausa NON e' tempo di stallo (2026-09-07).
+        # Il residuo del piano resta fermo per tutta la chiusura perche' non si
+        # riprende: senza questo azzeramento, alla riapertura il watchdog trova
+        # il residuo invariato e conta anche i minuti di pausa -> falso positivo
+        # "SENZA PROGRESSI da ~N min" subito dopo il messaggio di riapertura.
+        for k in ("plan_stall_ts", "plan_stall_left", "plan_stall_seen_ts"):
+            state.pop(k, None)
+        clear_alert("plan_stall")
+        # una notte con chiusura meteo non puo' mai essere dichiarata SECCA:
+        # a tetto chiuso non si campiona e non si sa cosa sia successo fuori
+        state["dew_blocked"] = True
         for k in ("weather_manual", "weather_restart_done",
                   "weather_reopen_notified", "weather_idle_ts",
                   "weather_resume_announced"):
@@ -2357,8 +2671,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
 
         if stage == "drying":
             closed = datetime.fromisoformat(state["flat_closed_ts"])
-            left_s = (float(ff.get("dry_wait_minutes", 25)) * 60
-                      - (now - closed).total_seconds())
+            left_s = dry_wait_min() * 60 - (now - closed).total_seconds()
             if left_s > 0:
                 # countdown "Attesa Flats -N minuti" ad ogni ciclo (5m); dedupe
                 # sul valore per non ripetere lo stesso -N su cicli ravvicinati
@@ -2606,6 +2919,136 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
     # 'done' dal mattino e farebbe early-return.
     su = cfg.get("startup", {}) or {}
 
+    # ---- RECUPERO "PRESE ACCESE, ASIAIR SPENTO" (specifica utente 2026-08-26) ----
+    # Caso reale della notte 25→26/8: l'utente accende l'ASIAIR nel pomeriggio per
+    # preparare il piano e poi fa lo SHUTDOWN dall'app, lasciando pero' accese le
+    # prese KASA. A quel punto il box e' halted ma alimentato: l'agente vede la
+    # presa ON e non ha nessun modo di far risalire l'ASIAIR — nessuna riaccensione
+    # scatta (la presa e' gia' accesa) e la notte va persa. L'unico rimedio e'
+    # togliere e ridare corrente.
+    # Tre paletti, tutti necessari:
+    #  1. SOLO a inizio notte (dal T-lead a window_minutes dopo il crepuscolo
+    #     nautico): un rig che muore a meta' sessione e' un altro problema e non
+    #     si risolve staccando la corrente sotto una posa;
+    #  2. SOLO con la VPN provata SU (vpn_diagnose): "ASIAIR muto" ha due cause,
+    #     box spento oppure tunnel giu'. Se e' il tunnel il rig puo' essere vivo e
+    #     magari con un autorun in corso — che non si tocca MAI — e staccare la
+    #     corrente sarebbe dannoso oltre che inutile;
+    #  3. SOLO la presa dell'ASIAIR (scelta utente): il Mount, se gia' acceso,
+    #     resta acceso. A box morto non sappiamo dove sia FISICAMENTE il mount, e
+    #     un mount riavviato si crede in HOME: il goto successivo potrebbe andare
+    #     a sbattere. Lasciandolo alimentato, l'ASIAIR appena riavviato ne rilegge
+    #     la posizione vera. Se invece il Mount e' spento viene acceso insieme al
+    #     riavvio (avvio a freddo normale).
+    # Un solo tentativo per notte: se dopo il ciclo di corrente l'ASIAIR tace
+    # ancora, e' un guasto vero e va segnalato, non ritentato all'infinito.
+    pc = su.get("power_cycle", {}) or {}
+
+    def asiair_silence_s(reachable: bool) -> float:
+        """Secondi di silenzio dell'ASIAIR, contati dalla PRIMA osservazione muta
+        della notte. Ritorna 0 se il box risponde (e azzera il conteggio).
+        NB: le chiavi NON stanno nel reset di inizio notte — il conteggio si arma
+        gia' nella finestra T-lead, che e' PRIMA del reset, e verrebbe cancellato
+        proprio quando serve. Si autolimitano con la marca di notte."""
+        if reachable:
+            state.pop("asiair_unreach_since", None)
+            state.pop("asiair_unreach_night", None)
+            return 0.0
+        if (state.get("asiair_unreach_night") != night_id
+                or not state.get("asiair_unreach_since")):
+            state["asiair_unreach_night"] = night_id
+            state["asiair_unreach_since"] = now.isoformat()
+            return 0.0
+        try:
+            since = datetime.fromisoformat(state["asiair_unreach_since"])
+        except Exception:
+            state["asiair_unreach_since"] = now.isoformat()
+            return 0.0
+        return (now - since).total_seconds()
+
+    def power_cycle_due(vpn: dict, silence_s: float) -> bool:
+        """True se ricorrono TUTTE le condizioni per il ciclo di corrente."""
+        if not pc.get("enabled", True) or n_start is None:
+            return False
+        if state.get("power_cycle_night_id") == night_id:
+            return False                      # gia' fatto stanotte
+        if manual_shutdown_active():
+            return False                      # shutdown voluto: non si riaccende
+        after = (now - n_start).total_seconds()
+        if not (-float(su.get("lead_minutes", 10)) * 60
+                <= after <= float(pc.get("window_minutes", 30)) * 60):
+            return False                      # fuori dalla finestra di inizio notte
+        if not vpn.get("vpn_up"):
+            return False                      # VPN giu': il silenzio non prova nulla
+        return silence_s >= float(pc.get("unreachable_minutes", 5)) * 60
+
+    def power_cycle_asiair() -> bool:
+        """Toglie e ridà corrente alla SOLA presa dell'ASIAIR. Il Mount lo accende
+        se lo trova spento, ma non lo spegne mai."""
+        nonlocal plug
+        alias = pc.get("outlet", "Asiair")
+        off_s = float(pc.get("off_seconds", 30))
+        target = next((m for m in managed if m["alias"] == alias), None)
+        if kc is None or dev is None or target is None:
+            alert("power_cycle", f"⛔ Recupero ASIAIR: presa «{alias}» non "
+                                 "raggiungibile/non trovata sulla KASA. Non tocco nulla.")
+            return False
+        mins = int(float(pc.get("unreachable_minutes", 5)))
+        if dry_run:
+            log.info("[dry-run] avrei ciclato la presa '%s' (%ss)", alias, off_s)
+            return False
+        notify(f"🔁 Prese accese ma ASIAIR muto da oltre {mins} minuti con la VPN "
+               f"attiva: tolgo corrente alla presa «{alias}» per {int(off_s)}s e "
+               "la riaccendo.")
+        try:
+            kc.set_outlet(dev, target["id"], False)
+            target["state"] = 0
+        except Exception as e:
+            alert("power_cycle", f"⛔ Recupero ASIAIR: spegnimento della presa "
+                                 f"«{alias}» fallito ({e}). Il rig resta com'è.")
+            return False
+        time.sleep(off_s)
+        # riaccende l'ASIAIR e, se era spento, anche il Mount: _kasa_power_on
+        # tocca solo le prese gestite che risultano OFF
+        ok_p, failed, perr = _kasa_power_on(kc, dev, managed, dry_run)
+        if failed or not ok_p:
+            alert("power_cycle", f"⛔ Recupero ASIAIR: riaccensione fallita "
+                                 f"({failed or perr}). PRESA «{alias}» SPENTA: "
+                                 "serve un intervento manuale.")
+            return False
+        plug = "ON"
+        state["power_cycle_night_id"] = night_id
+        state["power_cycle_ts"] = now.isoformat()
+        state["asiair_power_on_ts"] = now.isoformat()
+        state.pop("power_cycle_failed", None)
+        # il silenzio riparte da adesso: i minuti prima del ciclo non contano piu'
+        state["asiair_unreach_night"] = night_id
+        state["asiair_unreach_since"] = now.isoformat()
+        notify(f"🔌 Presa «{alias}» riaccesa. Aspetto il boot dell'ASIAIR e "
+               f"riprendo l'avvio normale; se entro "
+               f"{int(float(pc.get('verify_minutes', 6)))} minuti non risponde "
+               "te lo segnalo.")
+        return True
+
+    def power_cycle_failed_now() -> bool:
+        """Verdetto dopo il ciclo di corrente: passati verify_minutes senza che
+        l'ASIAIR risponda, e' un guasto vero. Si segnala UNA volta sola."""
+        if (state.get("power_cycle_night_id") != night_id
+                or state.get("power_cycle_failed")):
+            return False
+        try:
+            done = datetime.fromisoformat(state["power_cycle_ts"])
+        except Exception:
+            return False
+        if (now - done).total_seconds() < float(pc.get("verify_minutes", 6)) * 60:
+            return False
+        state["power_cycle_failed"] = True
+        notify(f"⛔ Ciclo di corrente eseguito alle "
+               f"{done.astimezone(tz).strftime('%H:%M')} ma l'ASIAIR non risponde "
+               "ancora. Non riprovo: serve un controllo manuale (box, "
+               "alimentazione o rete a SFRO). La notte è persa.")
+        return True
+
     def startup_rig():
         nonlocal plug
         dusk_txt = n_start.astimezone(tz).strftime("%H:%M")
@@ -2623,7 +3066,14 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         notify(f"🌆 Notte nautica alle {dusk_txt}: KASA accesa, aspetto il boot "
                "dell'ASIAIR e connetto i device…")
         t0 = time.time()
+        armed = False
         while not ping(ac.host):
+            if not armed:
+                # prima osservazione muta: arma il conteggio del silenzio, che
+                # serve al recupero di inizio notte (il ciclo di corrente scatta
+                # nel ramo in-night, dove i 5 minuti fanno in tempo a maturare)
+                asiair_silence_s(False)
+                armed = True
             if time.time() - t0 > float(su.get("ping_timeout_seconds", 240)):
                 alert("startup", "⛔ Avvio rig: l'ASIAIR non risponde al ping dopo "
                                  "l'accensione. Ritento al prossimo ciclo.")
@@ -2636,9 +3086,28 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             return
         state["startup_night_id"] = night_id     # rig su e connesso: non ripetere
         state["asiair_power_on_ts"] = now.isoformat()
+        asiair_silence_s(True)                   # box vivo: azzera il conteggio
         clear_alert("startup")
+        # RESET del piano rimasto IN SOSPESO (2026-08-27): se all'alba il reset e'
+        # fallito perche' il rig era gia' spento o irraggiungibile, si riprova ORA
+        # che l'ASIAIR e' acceso e connesso — cioe' prima che il ramo di notte
+        # trovi un piano ancora marcato "avviato" e ci creda (notte 26→27 persa).
+        if state.get("plan_reset_failed"):
+            okr, detr = ac.reset_plan()
+            if okr:
+                state.pop("plan_reset_failed", None)
+                clear_alert("plan_reset")
+                notify(f"🔁 Reset del piano rimasto in sospeso dall'alba: fatto ora ({detr}).")
+            else:
+                alert("plan_reset", f"⚠️ Reset del piano ancora NON riuscito ({detr}). "
+                                    "Se stasera il piano non parte, resettalo dall'app.")
         snap2 = ac.snapshot()
-        if snap2 and (snap2.get("plan_started") or snap2.get("capturing")):
+        # "gia' in corso" deve voler dire che SCATTA davvero: is_plan_started da
+        # solo resta alto dopo uno stop e, a rig appena acceso, farebbe saltare
+        # il pre-avvio (cooler e fascia) lasciando la camera calda (2026-08-27).
+        if snap2 and (snap2.get("capturing")
+                      or (snap2.get("plan_started")
+                          and snap2.get("capture_state") == "first_delay")):
             notify(f"🔗 Rig avviato e connesso ({det_c}). Piano gia' in corso.")
             return
         # SOLO INIZIALIZZAZIONE (specifica utente 2026-08-16): qui il piano NON
@@ -2688,8 +3157,11 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             notify("⛔ Flat/Dark manuali: flusso flat DISABILITATO in config, "
                    "non faccio nulla.")
             return
+        # anche i flat manuali usano l'attesa adattiva: col maltempo i campioni
+        # sono pochi o assenti (tetto chiuso) e si ricade sui 20' di sempre
         notify("🌓 Flat/Dark MANUALI presi in carico (richiesta dal menù): "
-               "chiudo la sessione di stanotte e avvio l'asciugatura.")
+               "chiudo la sessione di stanotte e avvio l'asciugatura.\n"
+               + dry_wait_set())
         # i light vanno sul NAS e nel diario PRIMA di leggere i filtri usati:
         # _session_filter_triples li cerca nel DB, che si popola dai FITS del NAS
         final_sync()
@@ -2847,7 +3319,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                   "error_notified", "asiair_power_on_ts", "last_wait_ts",
                   "last_kasa_reminder_ts", "plan_name",
                   "plan_stopped_ts", "plan_completed", "session_finalized",
-                  "plan_stall_left", "plan_stall_ts",
+                  "plan_stall_left", "plan_stall_ts", "plan_stall_seen_ts",
                   "flat_stage", "flat_closed_ts", "flat_started_ts", "flat_error",
                   "flat_filters", "flat_groups", "flat_wait_notified",
                   "flat_letters", "flat_times", "dark_groups", "flat_cool_ts",
@@ -2856,6 +3328,13 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                   "weather_closed", "weather_manual", "weather_restart_done",
                   "weather_reopen_notified", "weather_idle_ts",
                   "weather_resume_announced", "dawn_plan_checked",
+                  # statistiche condensa: valgono per UNA notte (2026-09-06).
+                  # 'dew_last' NO: l'ultimo campione resta come dato corrente
+                  # per Home Assistant anche fuori dalla notte.
+                  "dew_samples", "dew_first_ts", "dew_margin_min",
+                  "dew_margin_min_ts", "dew_wet_minutes", "dew_wet_ts",
+                  "dew_rain", "dew_blocked", "dew_fail",
+                  "dry_wait_effective", "dew_verdict", "dew_motivo",
                   # nuova notte = prima passata subito, senza aspettare la
                   # cadenza a partire dal sync dell'alba precedente
                   "last_sync_ts"):
@@ -2880,6 +3359,9 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         reach_ping = ping(ac.host) if ac.host else False
         snap = ac.snapshot() if (reach_ping and ac.available) else None
         reachable = bool(snap and snap.get("reachable"))
+        # "muto" = l'APP non risponde, non il solo ping: un box a meta' shutdown
+        # risponde ancora al kernel mentre l'ASIAIR e' gia' morto (visto il 25/8)
+        silence_s = asiair_silence_s(reachable)
 
         if not reachable:
             # ASIAIR irraggiungibile (spento o VPN giù). L'accensione KASA NON dipende
@@ -2900,6 +3382,10 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 if powered:
                     plug = "ON"
                     state["asiair_power_on_ts"] = now.isoformat()
+                    # corrente data ADESSO: il silenzio di prima non conta, i
+                    # minuti del recupero ripartono da questa accensione
+                    state["asiair_unreach_night"] = night_id
+                    state["asiair_unreach_since"] = now.isoformat()
                     tail = ("Connetto i device appena l'ASIAIR risponde."
                             if su.get("enabled") else "Collega i device dall'app.")
                     notify(f"🔌 ASIAIR spento/irraggiungibile → KASA accesa (Asiair+Mount). {tail}")
@@ -2908,7 +3394,15 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             elif plug == "ON":
                 # presa già accesa ma ASIAIR non risponde: in boot (VPN su) o VPN/rete giù
                 vpn = vpn_diagnose(ac.host, acfg.get("vpn_probe_host", ""))
-                if vpn.get("vpn_up"):
+                if power_cycle_failed_now():
+                    pass                       # verdetto dato, niente altro da dire
+                elif power_cycle_due(vpn, silence_s):
+                    # presa accesa + box muto da troppo + VPN provata su, a inizio
+                    # notte: e' il caso dello shutdown dall'app con le prese
+                    # lasciate accese. Togliere e ridare corrente e' l'unico modo
+                    # per farlo risalire (2026-08-26).
+                    power_cycle_asiair()
+                elif vpn.get("vpn_up"):
                     if status_due("last_wait_ts"):
                         notify("⏳ ASIAIR acceso, in avvio… in attesa che risponda.")
                         status_sent("last_wait_ts")
@@ -2923,8 +3417,29 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             # distinzione PIANO vs AUTORUN (2026-07-24): plan_started = piano vero;
             # capturing senza piano = autorun (flat/dark) o posa singola, avviati a
             # mano. Il piano si interrompe/riprende/ferma all'alba; l'autorun NO.
-            plan_on = bool(snap.get("plan_started"))
+            plan_flag = bool(snap.get("plan_started"))
             capturing = bool(snap.get("capturing"))
+            # FirstDelay = attesa programmata del piano: e' avviato davvero anche
+            # se non sta ancora scattando (li' is_working e' ingannevole)
+            first_delay = snap.get("capture_state") == "first_delay"
+            # ADOZIONE del piano (correzione 2026-08-27, notte 26→27 persa: 2h40m).
+            # is_plan_started resta TRUE dopo uno stop nostro o dopo un reset non
+            # riuscito, quindi DA SOLO non prova che il piano stia girando — e'
+            # lo stesso difetto gia' corretto il 2026-07-25 nel recupero meteo,
+            # che qui non era mai stato applicato: quella notte l'agente ha
+            # "adottato" un piano fermo e non ha mai chiamato start().
+            # Vale SOLO finche' l'agente non ha ancora visto il piano girare
+            # stanotte: serve anche una cattura in corso (o il FirstDelay). Appena
+            # il piano e' stato adottato — o e' gia' finito/fermato — si torna al
+            # flag secco e alla logica di fine piano, che non va toccata: cosi' una
+            # pausa fra due pose (dither, autofocus, flip) non fa mai credere che il
+            # piano sia fermo, e non provoca un secondo start() su una ripresa viva.
+            plan_stale = (plan_flag and not capturing and not first_delay
+                          and not state.get("imaging_active")
+                          and not state.get("plan_stopped_ts")
+                          and not state.get("error_notified")
+                          and not state.get("plan_completed"))
+            plan_on = plan_flag and not plan_stale
             autorun_on = capturing and not plan_on
             busy = plan_on or capturing
 
@@ -2990,6 +3505,25 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 # posa massima + flip/autofocus (300s + ~10' -> default 20').
                 wd_m = float(acfg.get("plan_stall_minutes", 20))
                 if wd_m > 0 and snap.get("capture_state") != "first_delay":
+                    # Il watchdog misura solo il tempo in cui ha DAVVERO
+                    # sorvegliato (2026-09-07). Se tra due passaggi e' trascorso
+                    # molto piu' di un ciclo, nel mezzo il piano non era in
+                    # ripresa — pausa meteo, first_delay, agente fermo, VPN giu'
+                    # — e quei minuti non sono imputabili a uno stallo: si
+                    # riparte da adesso invece di accusare il piano di un fermo
+                    # che l'agente stesso aveva deciso o semplicemente non ha
+                    # visto. Senza questo, la riapertura del tetto produceva un
+                    # "SENZA PROGRESSI da ~N min" lungo quanto la pausa.
+                    gap_m = None
+                    if state.get("plan_stall_seen_ts"):
+                        gap_m = (now - datetime.fromisoformat(
+                            state["plan_stall_seen_ts"])).total_seconds() / 60
+                    state["plan_stall_seen_ts"] = now.isoformat()
+                    if gap_m is None or gap_m > float(
+                            acfg.get("plan_stall_gap_minutes", 10)):
+                        state.pop("plan_stall_ts", None)
+                        state.pop("plan_stall_left", None)
+                        clear_alert("plan_stall")
                     okp, left, _ = ac.plan_left()
                     if okp:
                         if state.get("plan_stall_left") != left:
@@ -3051,8 +3585,26 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 # tutti i device collegati (da app) -> AVVIO (mai dopo il
                 # teardown della notte: niente riavvii post-chiusura)
                 if dry_run:
-                    log.info("[dry-run] avrei avviato il piano «%s»", snap.get("plan_name"))
+                    log.info("[dry-run] avrei avviato il piano «%s»%s",
+                             snap.get("plan_name"),
+                             " (previo reset: flag di avvio sporco)" if plan_stale else "")
                 else:
+                    # FLAG SPORCO -> RESET PRIMA DELL'AVVIO (2026-08-27): un piano
+                    # che risulta avviato ma non scatta ha quasi sempre anche il
+                    # progresso da azzerare, e in quello stato start_exposure non
+                    # lo fa ripartire (e' il guasto del 07/07-08/07 che ha fatto
+                    # nascere reset_plan). Il reset e' innocuo se il piano e' gia'
+                    # pulito: rilegge get_plan e torna "gia' azzerato".
+                    pre = ""
+                    if plan_stale:
+                        okr, detr = ac.reset_plan()
+                        if okr:
+                            state.pop("plan_reset_failed", None)
+                            clear_alert("plan_reset")
+                        pre = (f"\n🔁 Il piano risultava avviato ma fermo: resettato ({detr})."
+                               if okr else
+                               f"\n⚠️ Il piano risultava avviato ma fermo e il RESET non è "
+                               f"riuscito ({detr}): potrebbe non ripartire.")
                     try:
                         ok, detail = ac.start(snap)
                     except Exception as e:
@@ -3062,9 +3614,9 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                         state["plan_name"] = snap.get("plan_name")
                         clear_alert("plan_start")
                         notify(f"▶️ Device OK, OF2 aperto, piano «{snap.get('plan_name')}» avviato."
-                               + (f"\n🔥 {detail}" if detail else ""))
+                               + pre + (f"\n🔥 {detail}" if detail else ""))
                     else:
-                        alert("plan_start", f"⚠️ Avvio piano non riuscito: {detail}")
+                        alert("plan_start", f"⚠️ Avvio piano non riuscito: {detail}{pre}")
             elif not state.get("teardown_done"):
                 # device mancanti: con startup.enabled li connette l'AGENTE
                 # (connect_all, stessa ricetta dell'avvio T-5) — fallback se

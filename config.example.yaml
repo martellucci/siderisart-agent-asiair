@@ -79,6 +79,11 @@ asiair:
   # per 2h15m senza che nessuno se ne accorgesse. Soglia sopra posa massima +
   # flip/autofocus (300s + ~10'); 0 = disattivato. first_delay escluso.
   plan_stall_minutes: 20
+  # Il watchdog conta solo il tempo in cui ha davvero sorvegliato (2026-09-07):
+  # se tra due passaggi passa piu' di questo, nel mezzo il piano non era in
+  # ripresa (pausa meteo, agente fermo, VPN giu') e si riparte da zero invece
+  # di accusare uno stallo mai avvenuto. Ciclo agente = 3 min.
+  plan_stall_gap_minutes: 10
   # Flat panel OF2 (uscita 'flat_panel'). Aperto (state=false) come ULTIMO passo prima
   # dell'avvio (poi attende il motore); chiuso (state=true) nel teardown.
   flat_panel:
@@ -141,6 +146,20 @@ startup:
   # all'inizio della notte nautica, dal ramo di notte, non qui.
   lead_minutes: 10
   ping_timeout_seconds: 240
+  # RECUPERO "PRESE ACCESE, ASIAIR SPENTO" (richiesta utente 2026-08-26, dopo la
+  # notte 25→26/8 persa: ASIAIR acceso nel pomeriggio per preparare il piano,
+  # shutdown dall'app e prese KASA lasciate accese → box halted ma alimentato,
+  # nessuna riaccensione possibile). A inizio notte l'agente toglie e ridà
+  # corrente alla SOLA presa dell'ASIAIR. Vincoli nel codice: VPN provata su
+  # (altrimenti il silenzio non prova niente e il rig potrebbe essere vivo),
+  # un solo tentativo per notte, Mount mai spento.
+  power_cycle:
+    enabled: true
+    unreachable_minutes: 5    # silenzio dell'ASIAIR prima di agire
+    window_minutes: 30        # armato da T-lead fino a N min dopo il crepuscolo
+    off_seconds: 30           # quanto resta senza corrente
+    outlet: "Asiair"          # UNICA presa ciclata (il Mount si accende, mai si spegne)
+    verify_minutes: 6         # se dopo N min tace ancora → errore, niente ritenti
 
 flat_flow:
   enabled: true
@@ -155,7 +174,17 @@ flat_flow:
   # oltre questo valore non vengono MAI toccati dal flusso (l'utente li crea
   # ad hoc quando servono).
   dark_flat_max_exp_seconds: 30
-  dry_wait_minutes: 30          # asciugatura condensa a pannello chiuso (30' dal 2026-07-09)
+  # ASCIUGATURA CONDENSA a pannello chiuso. Dal 2026-09-06 l'attesa e' ADATTIVA
+  # sulla condensa stimata dalla stazione meteo di sito (blocco 'dew' in fondo):
+  # obiettivo = fare i dark quando la luce ambiente e' ancora bassa, senza
+  # rinunciare all'asciugatura quando serve davvero.
+  dry_wait_minutes: 20          # NORMALE: caso CIECO (dati mancanti, pochi,
+                                # vecchi, o notte con chiusura meteo)
+  dry_wait_dry_minutes: 5       # notte SECCA certificata (margine sempre ampio)
+  dry_wait_mid_minutes: 10      # notte INTERMEDIA (2026-09-07): misurata per
+                                # intero e mai bagnata, ma senza i 3°C di
+                                # margine che certificano la banda SECCA
+  dry_wait_wet_minutes: 30      # notte UMIDA (valore pre-2026-08-19, gia' validato)
   # GATE TEMPERATURA pre-flat (2026-07-24): flat/dark alla stessa temperatura
   # dei light. Target letto dalla camera (TargetTemp dell'app); se il cooler
   # e' spento viene riacceso (con anti-dew) e i flat aspettano finche' la
@@ -247,6 +276,27 @@ report:
                                # dati 2026 le due popolazioni sono separate da un vuoto
                                # netto fra 20" e 30". 0 = nessuna esclusione.
   targets: {}                  # ore obiettivo per soggetto, es. {NGC 7000: 60}
+                               # se valorizzato vince sul piano di acquisizione
+
+  # Confronto col piano di acquisizione (sfro_piani.py). I PDF stanno su Drive
+  # nella cartella "Piani di acquisizione": vanno CONDIVISI IN LETTURA con il
+  # service account del diario, altrimenti Drive risponde 404 e la colonna
+  # "Piano" resta vuota (la pagina esce lo stesso, senza quella sezione).
+  # Rilettura: una volta a notte, a fine notte texana. Un piano gia' arrivato al
+  # 100% non viene piu' scaricato, resta congelato in cache — a meno che il file
+  # su Drive risulti modificato, nel qual caso viene riletto comunque.
+  piani:
+    # richiede sfro_piani.py, che non fa parte del repo pubblico: lasciandolo
+    # a false la dashboard esce semplicemente senza la sezione "Piano".
+    enabled: false
+    folder_id: ""            # <<< id della cartella Drive con i PDF dei piani
+    sa_json: /opt/sfro-agent/gdrive_sa.json   # stesso SA del diario
+    cache_file: /var/lib/sfro-agent/piani.json
+    verde: 95                  # % del TEMPO previsto oltre cui lo stato e' verde
+    giallo: 40                 # sotto questa % e' rosso; fra le due, ambra
+    alias: {}                  # override {soggetto a diario: designazione o file}
+                               # serve solo se l'abbinamento automatico sbaglia:
+                               # gli alias sono gia' scritti dentro i PDF
 
 telegram: {enabled: true}
 
@@ -294,6 +344,38 @@ sync_module:
   # Le passate FISSE — fine piano, flat, teardown, bottone Rsync del bot —
   # ignorano questa cadenza e girano comunque.
   sync_interval_minutes: 15
+
+# --------------------------------------------------------------------------- #
+# STIMA CONDENSA (2026-09-06) — stazione meteo di sito SFRO sulla STESSA API
+# Alpaca del tetto: /api/v1/observingconditions/1/... (pubblica, senza VPN).
+# Serve a scegliere i minuti di asciugatura pre-flat: vedi flat_flow.
+#   margine = (T - punto di rugiada) - raffreddamento radiativo stimato
+# Il raffreddamento si stima dalla depressione del cielo (T - skytemperature) e
+# dal vento. margine <= margin_wet -> condensa in atto.
+# --------------------------------------------------------------------------- #
+dew:
+  enabled: true
+  adaptive: true             # false = misura e pubblica, ma l'attesa resta fissa
+  device_number: 1           # 'SFRO Weather Station' sull'alpaca_base del tetto
+  sample_interval_minutes: 6 # solo in notte a tetto APERTO e durante l'asciugatura
+  timeout_seconds: 5         # NON i 15s globali: la stazione non deve frenare il ciclo
+  retries: 0
+  max_age_minutes: 30        # campione piu' vecchio = dato assente -> 20 min
+  min_samples: 20            # sotto questa copertura (~2h) niente verdetto SECCA
+  margin_wet: 0.0            # margine sotto cui si considera condensa in atto
+  margin_dry: 3.0            # margine oltre cui la notte puo' dirsi SECCA
+  # raffreddamento radiativo stimato delle superfici NON riscaldate (°C sotto
+  # l'aria). Cielo ignoto -> si assume il caso peggiore (sereno e calmo).
+  sky_clear_depression: 15
+  sky_partly_depression: 5
+  wind_calm_ms: 2
+  k_clear_calm: 5
+  k_clear_windy: 3
+  k_partly: 3
+  k_cloudy: 1
+  frost_margin_c: 1.0        # sotto zero e' BRINA: il punto di brinamento e'
+                             # piu' alto di quello di rugiada, quindi si e'
+                             # piu' prudenti a parita' di lettura
 
 http: {timeout_seconds: 15, retries: 2, retry_backoff_seconds: 3}
 state_file: /var/lib/sfro-agent/state.json

@@ -59,7 +59,7 @@ KB = dict(in_night=True, roof="OPEN", asiair_ping=True, night="2026-07-24",
 
 A.nautical_window = lambda now, loc, tz, dep=12: (KB["in_night"], None, None, KB["night"])
 A.vpn_diagnose = lambda host, probe="": {"vpn_up": True, "cause": ""}
-A.http_get_json = lambda u, h: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
+A.http_get_json = lambda u, h, session=None: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
 A.sync_pass = lambda sc, dry: (CALLS.append("sync"),
                                {"ok": True, "files": 7, "error": None})[1]
 A.time.sleep = lambda s: None
@@ -158,12 +158,23 @@ def msg_has(frag):
 # N1: ripresa, poi alba -> teardown + drying
 cyc("N1a ripresa", in_night=True, snap=snap(started=True))
 assert state.get("imaging_active")
+# ATTESA ADATTIVA (2026-09-06): notte campionata a lungo e sempre lontana dalla
+# condensa -> verdetto SECCA, asciugatura 5 min invece di 20. Le statistiche si
+# iniettano qui perche' il verdetto si calcola all'INGRESSO in 'drying'.
+state.update({"dew_samples": 40, "dew_margin_min": 6.0, "dew_wet_minutes": 0,
+              "dew_last": {"margin_c": 6.0, "temp_c": 21.0, "dewpoint_c": 8.0,
+                           "ts": datetime(2026, 7, 24, 12, 35, tzinfo=tz).isoformat()}})
 cyc("N1b alba -> teardown", now=datetime(2026, 7, 24, 12, 40, tzinfo=tz),
     in_night=False)
 assert state.get("flat_stage") == "drying"
+assert state.get("dew_verdict") == "SECCA", state.get("dew_motivo")
+assert state.get("dry_wait_effective") == 5.0, state.get("dry_wait_effective")
+assert msg_has("asciugatura pannello 5 min"), MSGS
+assert msg_has("Condensa: notte SECCA"), MSGS
 
-# N2: fine attesa -> PRIMO gruppo: S+H @ gain 100, pannello 75%
-cyc("N2 gruppo (100,75)", now=datetime(2026, 7, 24, 13, 11, tzinfo=tz))
+# N2: fine attesa DOPO 6 MINUTI (non 20: il gate legge l'attesa adattiva)
+# -> PRIMO gruppo: S+H @ gain 100, pannello 75%
+cyc("N2 gruppo (100,75)", now=datetime(2026, 7, 24, 12, 46, tzinfo=tz))
 assert CALLS == ["gain(100)", "slots(flat,[4, 5],exp=None)", "brightness(75)",
                  "start_flats"], CALLS
 assert msg_has("per H+S (gain 100)"), MSGS

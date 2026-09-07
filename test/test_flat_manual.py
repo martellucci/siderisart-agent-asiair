@@ -66,7 +66,7 @@ KB = dict(in_night=True, roof="CLOSED", asiair_ping=True, night="2026-08-01",
 A.nautical_window = lambda now, loc, tz, dep=12: (KB["in_night"], None, None, KB["night"])
 A.vpn_diagnose = lambda host, probe="": {"vpn_up": True, "asiair_up": KB["asiair_ping"],
                                          "cause": ""}
-A.http_get_json = lambda u, h: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
+A.http_get_json = lambda u, h, session=None: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
 A.sync_pass = lambda sc, dry: (CALLS.append("sync"),
                                {"ok": True, "files": 7, "error": None})[1]
 A.time.sleep = lambda s: None
@@ -194,7 +194,12 @@ assert REQ.exists(), "richiesta per l'agente scritta"
 assert bot_has("fermo piano «Sideris»"), BOT_MSGS
 assert "teardown(keep_cooler=True)" in CALLS and "reset_plan" in CALLS, CALLS
 assert "set_output(dew_heater,100)" in CALLS, CALLS
-assert bot_has("Asciugatura 30 min"), BOT_MSGS
+# il tempo di asciugatura si legge dalla config (era fisso a 30: e' passato a
+# 20 il 2026-08-19 e il test restava indietro). Dal 2026-09-06 il bot lo
+# annuncia come ORDINE DI GRANDEZZA: i minuti veri li decide l'agente in base
+# alla condensa stimata, e li scrive lui stesso quando prende in carico.
+assert bot_has(f"Asciugatura ~{int(cfg['flat_flow']['dry_wait_minutes'])} min"), BOT_MSGS
+assert bot_has("adatta alla condensa stimata"), BOT_MSGS
 req = json.loads(REQ.read_text())
 assert req["ask_shutdown"] and req["closed_ts"], req
 

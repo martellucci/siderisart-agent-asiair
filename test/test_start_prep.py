@@ -84,15 +84,22 @@ A.AsiairControl.cooler_on = (
     lambda self: (PREP.append("cooler_on"), KB["cooler"])[1])
 A.AsiairControl.camera_cooling = lambda self: (True, 21.4, 0.0, True, "")
 
-START_SCRIPT = {"set_page": {"code": 0},
-                "start_exposure": {"code": 0},
-                "get_enabled_plan": {"code": 0,
-                                     "result": [{"is_plan_started": True}]}}
+def start_script():
+    """Script di un avvio SANO. get_enabled_plan e' una coda: la prima risposta
+    e' la lettura PRIMA del comando (dal 2026-08-27 start() la fa per capire se
+    il flag era gia' sporco) e vale False; la seconda e' la verifica dopo
+    start_exposure e vale True. Una funzione e non una costante: la coda si
+    consuma, e ogni scenario ne vuole una nuova."""
+    return {"set_page": {"code": 0},
+            "start_exposure": {"code": 0},
+            "get_enabled_plan": [
+                {"code": 0, "result": [{"is_plan_started": False}]},
+                {"code": 0, "result": [{"is_plan_started": True}]}]}
 
 # 1) tutto ok: detail = esiti pre-avvio
 KB = {"antidew": (True, "gia' acceso"), "heater": (True, ""), "cooler": (True, "")}
 PREP.clear()
-fc = with_client(dict(START_SCRIPT))
+fc = with_client(start_script())
 ok, det = ac.start(snap_ok)
 assert ok, det
 assert det == ("anti-dew camera ON (gia' acceso) · fascia anticondensa al 100% · "
@@ -106,7 +113,7 @@ print("start ok:", det)
 KB = {"antidew": (False, "timeout"), "heater": (False, "boh"),
       "cooler": (False, "code 107")}
 PREP.clear()
-fc = with_client(dict(START_SCRIPT))
+fc = with_client(start_script())
 ok, det = ac.start(snap_ok)
 assert ok, det
 assert "⚠️ anti-dew camera NON verificato (timeout)" in det, det
@@ -115,5 +122,31 @@ assert "⚠️ fascia anticondensa NON impostata (boh)" in det, det
 assert "⚠️ cooler NON acceso (code 107)" in det, det
 assert ("start_exposure", ["light"]) in fc.calls, "il piano deve partire comunque"
 print("start con warning:", det)
+
+# 3) FLAG GIA' ALTO e camera FERMA (notte 26→27): start_exposure torna code 0 e
+#    is_plan_started era gia' true — non prova niente. start() deve FALLIRE, non
+#    dichiarare avviato un piano fantasma.
+KB = {"antidew": (True, ""), "heater": (True, ""), "cooler": (True, "")}
+fc = with_client({"set_page": {"code": 0}, "start_exposure": {"code": 0},
+                  "get_enabled_plan": {"code": 0,
+                                       "result": [{"is_plan_started": True}]},
+                  "get_app_state": {"code": 0,
+                                    "result": {"capture": {"is_working": False,
+                                                           "state": "idle"}}}})
+ok, det = ac.start(snap_ok)
+assert not ok, "flag sporco + camera ferma: NON e' avviato"
+assert "flag di avvio gia' alto e camera ferma" in det, det
+print("start con flag sporco:", det)
+
+# 4) flag gia' alto ma la camera LAVORA davvero (o e' in FirstDelay): avviato
+for cap in ({"is_working": True, "state": "expose"},
+            {"is_working": False, "state": "first_delay"}):
+    fc = with_client({"set_page": {"code": 0}, "start_exposure": {"code": 0},
+                      "get_enabled_plan": {"code": 0,
+                                           "result": [{"is_plan_started": True}]},
+                      "get_app_state": {"code": 0, "result": {"capture": cap}}})
+    ok, det = ac.start(snap_ok)
+    assert ok, (cap, det)
+print("start con flag alto ma camera al lavoro/FirstDelay: OK")
 
 print("\nTUTTI I TEST START-PREP: OK")

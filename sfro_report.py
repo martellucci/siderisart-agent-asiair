@@ -17,6 +17,7 @@ Uso:  python3 sfro_report.py --config config.yaml [--out /tmp/x.html]
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import logging
@@ -40,6 +41,9 @@ DEFAULTS = {
                                 # guida ma un movimento della montatura: escluso
                                 # dagli aggregati. 0 = nessuna esclusione.
     "targets": {},              # ore obiettivo per soggetto, es. {"NGC 7000": 60}
+                                # override manuale: se presente vince sul piano
+    "piani": {},                # confronto col piano di acquisizione: vedi
+                                # sfro_piani.py (cartella Drive dei PDF)
     "title": "SFRO — Diario osservativo",
     "logo": "logo.png",         # marchio in testata; relativo alla dir dello script.
                                 # Incorporato nella pagina (resta un file solo).
@@ -271,6 +275,15 @@ def collect(cfg: dict) -> dict:
                 (nid,)).fetchall()
         d["csv_dir"] = c.get("detail_csv_dir", "")
         d["loc"] = c.get("location_label", "SFRO")
+        # --- confronto col piano di acquisizione (best-effort) ---
+        # La cache dei piani e' scritta da sfro_piani.py a fine notte: qui si
+        # legge e basta. Se manca, la pagina esce esattamente come prima.
+        d["piani"] = {}
+        try:
+            import sfro_piani as PI
+            d["piani"] = PI.confronto(cfg, sorted({p[0] for p in d["proj"]}))
+        except Exception as e:
+            log.warning("piani di acquisizione non disponibili: %s", e)
         return d
     finally:
         db.close()
@@ -579,6 +592,65 @@ summary:hover{color:var(--gold)}
 footer{color:var(--mut2);font-size:12px;margin-top:36px;border-top:1px solid var(--bd);
 padding-top:14px}
 .leg{color:var(--mut);font-size:13px;margin:6px 2px 0}
+/* ── piano di acquisizione ──────────────────────────────────────────────────
+   Semaforo sul TEMPO, non sugli scatti: se la sub cambia in campo il conteggio
+   frame mente (NGC7635, R a 60s invece di 120s: 112 scatti su 60 previsti ma
+   meno tempo del piano). La finestra e' HTML gia' impaginato dal server, non
+   un template JS: la pagina deve restare un file solo, senza nulla da fuori. */
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+flex:0 0 auto;vertical-align:middle}
+.pi-cell{display:flex;align-items:center;gap:7px;justify-content:flex-end}
+.pi-cell .bar{flex:1 1 46px}
+a.pi-open{color:var(--tx);text-decoration:none;cursor:pointer;
+border-bottom:1px dotted var(--bd2)}
+a.pi-open:hover{color:var(--gold);border-bottom-color:var(--gold-dark)}
+.pi-none{color:var(--mut2)}
+.pi-back{position:fixed;inset:0;z-index:90;display:none;overflow:auto;
+background:rgba(3,8,22,.8);padding:24px 14px}
+.pi-back.on{display:block}
+.pi-win{background:var(--pan);border:1px solid var(--bd2);border-radius:12px;
+width:min(960px,100%);margin:0 auto;box-shadow:0 18px 60px rgba(0,0,0,.6)}
+.pi-head{display:flex;align-items:flex-start;gap:14px;padding:16px 18px 12px;
+border-bottom:1px solid var(--bd)}
+.pi-head h3{margin:0;font-size:20px;font-weight:500;color:var(--gold);
+font-family:var(--sans);letter-spacing:.2px}
+.pi-src{font-family:var(--mono);font-size:10px;letter-spacing:1.1px;
+color:var(--mut2);text-transform:uppercase;margin-top:5px}
+.pi-x{margin-left:auto;background:none;border:1px solid var(--bd);color:var(--mut);
+border-radius:7px;font-size:19px;line-height:1;padding:4px 10px;cursor:pointer}
+.pi-x:hover{color:var(--gold);border-color:var(--bd2)}
+.pi-tot{padding:14px 18px;border-bottom:1px solid var(--bd);background:var(--pan2)}
+.pi-tot .r1{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+font-family:var(--mono);font-size:13px}
+.pi-tot .pc{font-size:25px;color:var(--gold);letter-spacing:-.5px}
+.pi-tot .bar{height:9px;margin-top:10px}
+.pi-body{padding:4px 18px 18px;overflow-x:auto}
+.pi-body table{min-width:660px}
+.pi-body th{cursor:default}          /* qui non si ordina: e' l'ordine del piano */
+.pi-body th.sep,.pi-body td.sep{border-left:1px solid var(--bd)}
+.pi-body tr.grp th{position:static;background:none;border-bottom:none;
+color:var(--gold-dark);letter-spacing:1.6px;padding-bottom:2px}
+.pi-avv{color:var(--warn);font-size:13px;margin:12px 2px 0;line-height:1.5}
+/* Sul telefono spariscono due colonne, e nessuna delle due porta informazione
+   che non sia altrove:
+     - Gain: in tutti i piani ogni riga a gain 0 si chiama "stelle" e il resto e'
+       gain 100, quindi si rilegge dall'etichetta del filtro. Il Sub invece resta
+       (scelta utente 2026-09-03): non e' deducibile da nulla ed e' il valore che
+       cambia sul campo.
+     - Δ tempo: e' la sottrazione fra le due colonne Tempo, entrambe visibili.
+       Al suo posto entra in vista lo Stato, che e' il punto della finestra.
+   Il nome del filtro puo' andare a capo, cosi' la colonna piu' larga
+   ("OIII (narrowband 3nm)") smette di dettare la misura di tutta la tabella. */
+@media(max-width:620px){
+.pi-back{padding:14px 8px}
+.pi-body{padding:4px 10px 14px}
+.pi-body table{min-width:0}
+.pi-body .c-gain,.pi-body .c-delta{display:none}
+.pi-body td.l{white-space:normal;min-width:92px;font-size:13.5px;line-height:1.35}
+.pi-body th,.pi-body td{padding:7px 5px}
+.pi-body td{font-size:12px}
+.pi-head,.pi-tot{padding-left:12px;padding-right:12px}
+}
 """
 
 JS = """
@@ -594,7 +666,119 @@ document.querySelectorAll('table.sort th').forEach(function(th,i){
       r=(!isNaN(nx)&&!isNaN(ny))?nx-ny:(''+x).localeCompare(''+y);
       return d?-r:r;});
     rs.forEach(function(r){tb.appendChild(r);});};});
+
+/* Finestra del piano di acquisizione: si apre dal nome del soggetto, si chiude
+   con la X, con Esc o cliccando fuori. */
+(function(){
+  function chiudi(){
+    document.querySelectorAll('.pi-back.on').forEach(function(b){b.classList.remove('on');});
+    document.body.style.overflow='';}
+  function apri(id){
+    var b=document.getElementById(id);
+    if(!b)return;
+    chiudi(); b.classList.add('on'); document.body.style.overflow='hidden';}
+  document.querySelectorAll('a.pi-open').forEach(function(a){
+    a.onclick=function(e){e.preventDefault();apri(a.dataset.pi);};});
+  document.querySelectorAll('.pi-x').forEach(function(x){x.onclick=chiudi;});
+  document.querySelectorAll('.pi-back').forEach(function(b){
+    b.onclick=function(e){if(e.target===b)chiudi();};});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')chiudi();});
+})();
 """
+
+
+# --------------------------------------------------------------------------- #
+# Piano di acquisizione: cella in tabella e finestra di dettaglio
+# --------------------------------------------------------------------------- #
+SEM_COL = {"ok": "var(--ok)", "warn": "var(--warn)", "bad": "var(--bad)",
+           "vuoto": "var(--mut2)"}
+
+
+def _pi_id(key: str) -> str:
+    """Chiave soggetto -> id HTML stabile (i nomi hanno spazi e accenti)."""
+    return "pi-" + hashlib.md5(key.encode("utf-8")).hexdigest()[:10]
+
+
+def _dot(st) -> str:
+    return f"<span class='dot' style='background:{SEM_COL.get(st, SEM_COL['vuoto'])}'></span>"
+
+
+def _pi_cell(s) -> str:
+    """Colonna 'Piano' della tabella progetti: semaforo, barra, percentuale."""
+    if not s:
+        return "<span class='ax'>—</span>"      # soggetto senza piano su Drive
+    col = SEM_COL.get(s["stato"], SEM_COL["vuoto"])
+    return (f"<div class='pi-cell'>{_dot(s['stato'])}"
+            f"<div class='bar'><i style='width:{min(100.0, s['pc']):.0f}%;"
+            f"background:{col}'></i></div>"
+            f"<span class='ax'>{s['pc']:.0f}%</span></div>")
+
+
+def _pi_nome(key: str, s) -> str:
+    """Nome del soggetto: cliccabile solo se c'e' un piano da mostrare."""
+    if not s:
+        return esc(key)
+    return (f"<a class='pi-open' data-pi='{_pi_id(key)}' href='#' "
+            f"title='piano di acquisizione'>{esc(key)}</a>")
+
+
+def _pi_win(key: str, s) -> str:
+    """Finestra: previsto contro effettuato, riga per riga di piano."""
+    col = SEM_COL.get(s["stato"], SEM_COL["vuoto"])
+    src = esc(s["file"])
+    if s.get("letto"):
+        y, m, g = s["letto"][:10].split("-")[:3]
+        src += f" · letto il {esc(g)}/{esc(m)}/{esc(y)}"
+    o = [f"<div class='pi-back' id='{_pi_id(key)}'><div class='pi-win'>",
+         f"<div class='pi-head'><div><h3>{esc(key)}</h3>",
+         f"<div class='pi-src'>{src}</div></div>",
+         "<button class='pi-x' title='chiudi'>&times;</button></div>",
+         "<div class='pi-tot'><div class='r1'>", _dot(s["stato"]),
+         f"<span class='pc'>{s['pc']:.0f}%</span>",
+         f"<span>{hm(s['sec_fatti'])} su {hm(s['sec_prev'])} previste</span>",
+         f"<span class='ax'>· {s['n_fatti']} scatti su {s['n_prev']} previsti</span>",
+         "</div>",
+         f"<div class='bar'><i style='width:{min(100.0, s['pc']):.0f}%;"
+         f"background:{col}'></i></div></div>",
+         # le tre celle di testa del gruppo sono separate e non un colspan='3':
+         # sotto i 620px la colonna Gain sparisce, e con un colspan i due gruppi
+         # "Previsto"/"Effettuato" scivolerebbero di una colonna
+         "<div class='pi-body'><table><thead>"
+         "<tr class='grp'><th></th><th class='c-gain'></th><th></th>"
+         "<th colspan='2' class='sep'>Previsto dal piano</th>"
+         "<th colspan='2' class='sep'>Effettuato</th>"
+         "<th class='c-delta'></th><th></th></tr><tr>"
+         "<th class='l'>Filtro</th><th class='c-gain'>Gain</th><th>Sub</th>"
+         "<th class='sep'>Scatti</th><th>Tempo</th>"
+         "<th class='sep'>Scatti</th><th>Tempo</th>"
+         "<th class='c-delta'>Δ tempo</th><th>Stato</th></tr></thead><tbody>"]
+    for v in s["voci"]:
+        dl = v["delta"]
+        seg = ("—" if not v["sec_fatti"] else
+               "in pari" if abs(dl) < 60 else
+               ("+" if dl > 0 else "−") + hm(abs(dl)))
+        o.append(
+            f"<tr><td class='l'>{_fbadge(v['filt'])}&nbsp;{esc(v['lbl'])}</td>"
+            f"<td class='c-gain'>{v['gain']}</td><td>{v['sub']:.0f}s</td>"
+            f"<td class='sep'>{v['n_prev']}</td><td>{hm(v['sec_prev'])}</td>"
+            f"<td class='sep'>{v['n_fatti'] or '—'}</td>"
+            f"<td>{hm(v['sec_fatti']) if v['sec_fatti'] else '—'}</td>"
+            f"<td class='c-delta'>{seg}</td>"
+            f"<td>{_dot(v['stato'])} {v['pc']:.0f}%</td></tr>")
+    o.append("</tbody></table>")
+    if s.get("sub_diverse"):
+        det = ", ".join(f"{esc(l)} a {b}s invece di {a:.0f}s"
+                        for l, a, b in s["sub_diverse"])
+        o.append(f"<div class='pi-avv'>⚠ Sub diversa dal piano: {det}. "
+                 f"Su questi filtri scatti e tempo non si corrispondono: "
+                 f"il semaforo segue il tempo.</div>")
+    if s.get("orfano"):
+        o.append("<div class='pi-avv'>⚠ Nessun frame a diario per questo piano: "
+                 "soggetto non ancora iniziato, oppure il nome del piano non "
+                 "combacia con quello del soggetto (si corregge con "
+                 "<code>report.piani.alias</code> in configurazione).</div>")
+    o.append("</div></div></div>")
+    return "".join(o)
 
 
 def _fbadge(filt):
@@ -723,30 +907,56 @@ def render(cfg: dict, d: dict) -> str:
       "<th class='l'>Filtri — scatti e ore</th><th>Notti</th><th>Scatti</th>"
       "<th>Integrazione</th>"
       "<th title='mediana dei frame validi'>RMS med.</th>"
-      "<th>Obiettivo</th><th class='l'>Prima</th>"
+      "<th title='tempo integrato sul tempo previsto dal piano di acquisizione'>"
+      "Piano</th><th class='l'>Prima</th>"
       "<th class='l'>Ultima</th></tr></thead><tbody>")
+    piani = d.get("piani") or {}
     for obj, p in sorted(prj.items(), key=lambda kv: -kv[1]["tot"]):
         badges = "".join(
             _fbadge(f) + f"<span class='ax'> {v[1]} · {hm(v[0])}</span>&nbsp; "
             for f, v in sorted(p["filt"].items(), key=lambda kv: _fkey(kv[0])))
+        s = piani.get(obj)
         tg = targets.get(obj)
-        if tg:
+        if tg:            # obiettivo scritto a mano in config: vince sul piano
             pcv = min(100, 100 * p["tot"] / 3600 / tg)
             col = "var(--ok)" if pcv >= 100 else "var(--acc)"
             goal = (f"<div class='bar'><i style='width:{pcv:.0f}%;background:{col}'></i>"
                     f"</div><span class='ax'>{p['tot']/3600:.0f}/{tg:.0f}h</span>")
+            ordv = pcv
         else:
-            goal = "<span class='ax'>—</span>"
+            goal = _pi_cell(s)
+            ordv = s["pc"] if s else -1.0
         # mediana calcolata sui frame del soggetto, non media delle mediane per
         # filtro: quest'ultima peserebbe allo stesso modo un filtro da 10 pose
         # e uno da 400
         rms = d["rms_idx"]["obj"].get(obj)
-        a(f"<tr><td class='l'>{esc(obj)}</td><td class='l'>{badges}</td>"
+        a(f"<tr><td class='l'>{_pi_nome(obj, s)}</td><td class='l'>{badges}</td>"
           f"<td>{len([n for n in nights if obj in n['obj']])}</td><td>{p['n']}</td>"
           f"<td data-v='{p['tot']}'>{hm(p['tot'])}</td><td>{_n(rms)}</td>"
-          f"<td data-v='{p['tot']}'>{goal}</td><td class='l'>{esc(p['p0'])}</td>"
+          f"<td data-v='{ordv:.1f}'>{goal}</td><td class='l'>{esc(p['p0'])}</td>"
           f"<td class='l'>{esc(p['p1'])}</td></tr>")
-    a("</tbody></table></div>")
+    # I piani senza un solo scatto compaiono lo stesso (scelta utente
+    # 2026-09-03): altrimenti la tabella dice cosa e' stato fatto e mai cosa
+    # resta da fare.
+    for key, s in sorted(((k, v) for k, v in piani.items() if v.get("orfano")),
+                         key=lambda kv: -kv[1]["sec_prev"]):
+        a(f"<tr><td class='l'>{_pi_nome(key, s)}</td>"
+          f"<td class='l'><span class='ax pi-none'>mai iniziato — "
+          f"{s['n_prev']} scatti, {hm(s['sec_prev'])} da fare</span></td>"
+          f"<td>—</td><td>—</td><td data-v='-1'>—</td><td>—</td>"
+          f"<td data-v='0.0'>{_pi_cell(s)}</td>"
+          f"<td class='l'>—</td><td class='l'>—</td></tr>")
+    a("</tbody></table>")
+    if piani:
+        pc_v = float((r.get("piani") or {}).get("verde", 95))
+        pc_g = float((r.get("piani") or {}).get("giallo", 40))
+        a("<div class='leg'>Il nome del soggetto apre il confronto col piano di "
+          "acquisizione, filtro per filtro. Il semaforo guarda il <b>tempo</b> "
+          f"integrato, non il numero di scatti: verde da {pc_v:.0f}%, ambra da "
+          f"{pc_g:.0f}%, rosso sotto.</div>")
+    a("</div>")
+    for key, s in piani.items():
+        a(_pi_win(key, s))
 
     # ---------------- notti ----------------
     a("<h2>Rendimento delle notti</h2><div class='card'>")

@@ -32,7 +32,7 @@ A._kasa_power_off_all = lambda kc, dev, dry: (2, [], None)
 # roof + snapshot controllati per ciclo
 ROOF = "OPEN"
 SNAP = {}
-A.http_get_json = lambda url, http: {}
+A.http_get_json = lambda url, http, session=None: {}
 A.parse_alpaca = lambda data: ROOF
 
 CONNECTED = {"cam_open": True, "focuser_connected": True, "wheel_connected": True,
@@ -90,7 +90,9 @@ def last(n=1):
 
 # ===================== A) piano in corso, poi chiusura meteo =====================
 STATE = {"night_id": "2026-07-24", "nautical_announced": True}
-ROOF, SNAP, IN_NIGHT = "OPEN", snap(plan=True), True
+# capt=True perche' "piano in corso" vuol dire che SCATTA: dal 2026-08-27 il
+# flag da solo non basta piu' ad adottare il piano (scenario H qui sotto)
+ROOF, SNAP, IN_NIGHT = "OPEN", snap(plan=True, capt=True), True
 cycle()
 assert STATE.get("imaging_active") is True, STATE
 assert STATE.get("plan_name") == "M31"

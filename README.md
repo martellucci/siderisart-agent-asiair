@@ -56,8 +56,19 @@ evenings.
   **nautical night**, computed from the observatory's coordinates.
 - Turns on the camera's anti-dew heater and the dew strap, opens the motorised
   flat panel, **starts the plan**.
-- Every 5 minutes: verifies imaging is progressing, **syncs FITS** to the NAS
-  incrementally, updates the session log.
+- Every 3 minutes: verifies imaging is progressing and updates the session log;
+  every 15 minutes it **syncs FITS** to the NAS incrementally (the fixed points —
+  end of plan, weather, flats, shutdown — always sync).
+- **Watches real progress**: not the "plan started" flag, which stays on even
+  with the plan stopped, but the **plan's remaining work**. If it doesn't go down
+  for 20 minutes, you get a Telegram alert. It is only an alert: an exposure in
+  progress is never touched.
+- **If the plugs are on but the ASIAIR is silent**, at the start of the night it
+  cuts and restores power to the ASIAIR outlet **only**, for 30 seconds, once per
+  night — this is the case of a shutdown from the app with the power left on,
+  which leaves the box halted but powered and unreachable.
+- **Measures dew** every 6 minutes with the roof open, to decide at dawn how long
+  to wait before flats (below).
 - **Weather closure is a pause, not an ending**: it stops the plan, parks, closes
   the panel — but keeps the cooler running and resets nothing. When the roof
   reopens, **the plan resumes by itself from where it left off**.
@@ -65,8 +76,9 @@ evenings.
 **At dawn**
 
 - Stops the plan, parks the mount, resets the plan for the next night.
-- Dew strap to full and **30 minutes of drying** before any flat, because
-  condensation on the panel ruins flats and you won't notice until it's too late.
+- Dew strap to full and **drying before any flat** — from 5 to 30 minutes
+  depending on the dew measured through the night (below). Condensation on the
+  panel ruins flats and you won't notice until it's too late.
 - **Flats per (filter, gain) actually used that night**: it reads from the
   session log which filters you shot and at what gain, groups them, sets panel
   brightness per group and runs one autorun for each, with AUTO exposure.
@@ -79,13 +91,72 @@ evenings.
 
 - **Telegram bot** with a button menu: status, power-on, start plan, manual sync,
   on-demand flats/darks, shutdown — every dangerous action behind a confirmation.
-- **MQTT telemetry** to Home Assistant: ~50 entities covering guiding (RMS and
+- **MQTT telemetry** to Home Assistant: ~60 entities covering guiding (RMS and
   peaks over a moving window), camera, focus, mount, storage, the box's CPU
-  temperature and per-outlet power draw.
+  temperature, per-outlet power draw and the site weather station with its dew
+  estimate.
 - **Automatic session log**: reads FITS headers into SQLite, updates a Google
   Sheet with aggregates, writes per-night detail to CSV.
 - **Self-contained HTML dashboard**: hours per target and filter, yield against
   available darkness, guiding RMS and HFR per night, histograms.
+
+---
+
+## Dew: measured, not guessed
+
+The drying wait before flats used to be a blind constant. But every extra minute
+of waiting is a minute of **darks taken with more ambient light**: at nautical
+dawn there is less than 50 minutes to sunrise, and civil twilight comes earlier.
+Hence the idea of measuring instead of guessing.
+
+Dew forms when a surface drops below the dew point, and an unheated surface is
+**not at air temperature**: it radiates to the sky and cools, the more so the
+clearer the sky and the stiller the air. So:
+
+```
+margin = (temperature − dew point) − estimated radiative cooling
+```
+
+The cooling is estimated from the **sky depression** (`air temperature − sky
+temperature`, which a weather station with an IR sensor reports) and from
+**wind**: about 5 °C under a clear, calm sky, 3 °C if clear and windy or hazy,
+1 °C under overcast — and **5 °C when the sky is unknown**, i.e. the worst case.
+A margin ≤ 0 means dew is forming. Below freezing it is **frost**, not dew: the
+frost point sits above the dew point the station reports, so one more degree of
+caution is subtracted.
+
+**The measurement covers the whole night, not dawn**: if the margin collapsed at
+03:00, the dew is still there at 06:00. The agent samples every 6 minutes, but
+**only at night and with the roof open** (with the roof closed the optics don't
+see the sky and don't radiate), and keeps the minimum margin, the wet minutes,
+rain and the number of readings.
+
+At dawn the verdict picks **how long to wait**:
+
+| Band | Wait | When |
+|---|---|---|
+| **DRY** | 5 min | minimum *and* current margin both comfortable, no rain, no roof closure, full coverage of the night |
+| **INTERMEDIATE** | 10 min | night measured end to end and never wet, but without the margin that certifies the dry band |
+| **NORMAL** | 20 min | **the blind case**: station down, data stale or too sparse, or a night with a weather closure (with the roof closed nothing is sampled and there is no way to know what happened outside) |
+| **WET** | 30 min | dew actually observed, or rain |
+
+The asymmetry is deliberate: **one hint is enough to lengthen the wait, but
+shortening it takes unanimity.** The intermediate band exists because *"not
+certifiable as dry"* is not the same as *"I know nothing"*: a night measured from
+end to end without ever seeing dew is information, and deserves less than the 20
+minutes meant for when we are blind. The physical argument points the same way:
+worst-case cooling is calibrated on a surface that sees the whole sky, while
+optics inside an enclosure only see part of it.
+
+The verdict is computed **once**, when drying starts, so the countdown and the
+final check read the same number and cannot diverge halfway through. All of it
+can be turned off (`dew.enabled: false`), and there is an **observation mode**
+(`dew.adaptive: false`) that measures and publishes over MQTT but leaves the wait
+fixed: the honest way to watch the data for a few weeks before letting it change
+your timings.
+
+You need a weather station you can query — here it is the site's own, exposed on
+the same Alpaca API as the roof. Without one, the agent stays on the fixed value.
 
 ---
 
@@ -96,7 +167,7 @@ evenings.
                  │  roof API   │◄──────────────────┤              │
                  └─────────────┘                   │              │
                  ┌─────────────┐   TP-Link cloud   │    AGENT     │
-                 │ smart plugs │◄──────────────────┤  (every 5')  │
+                 │ smart plugs │◄──────────────────┤  (every 3')  │
                  └─────────────┘                   │              │
                  ┌─────────────┐   JSON-RPC 4700   │    state     │
                  │   ASIAIR    │◄──────────────────┤   machine    │
@@ -116,7 +187,7 @@ evenings.
 
 | File | Role |
 |---|---|
-| `sfro_agent.py` | The agent. A systemd **oneshot timer every 5 minutes**: no daemon that can die quietly, every cycle starts fresh by reading state from disk. Night orchestration, teardown, flat/dark flow, sync. |
+| `sfro_agent.py` | The agent. A systemd **oneshot timer every 3 minutes**: no daemon that can die quietly, every cycle starts fresh by reading state from disk. Night orchestration, teardown, flat/dark flow, sync. |
 | `sfro_mqtt.py` | Long-running service: MQTT/Home Assistant telemetry, listens to the ASIAIR's push events, writes guiding and autofocus JSONL sinks. |
 | `sfro_telegram.py` | Long-running service: Telegram bot with button menu and confirmations. |
 | `sfro_sessionlog.py` | Session log: FITS → SQLite → Google Sheet + CSV. |
@@ -144,7 +215,8 @@ to break — and if it does hang, the next timer fires anyway.
 - **Optional**: TP-Link Kasa smart plugs (powering the rig on and off), an MQTT
   broker and Home Assistant (telemetry), a Telegram bot (notifications and
   commands), a NAS or any disk for the FITS, a Google service account (Sheets
-  log), Apache or any web server (dashboard).
+  log), Apache or any web server (dashboard), a weather station reachable over
+  ASCOM Alpaca (adaptive pre-flat drying).
 - A **roof or dome exposing an ASCOM Alpaca API**, if you want the roof logic.
   Without one the agent still works: treat the roof as always open and keep the
   rest of the automation.
@@ -219,7 +291,9 @@ evening.
 | Trap | What happens | How it's handled |
 |---|---|---|
 | **`value: 0` on the flat panel** | The firmware reads 0 as `state:false` and the panel **OPENS** instead of turning off. | "Closed and off" is `value:5, state:true`. Never zero on a PWM output. |
-| **`is_plan_started` lies** | It stays `true` after the plan has been stopped: it does not mean "currently imaging". | "Currently imaging" requires `plan_started` **and** `capturing`. |
+| **`is_plan_started` lies** | It stays `true` after the plan has been stopped: it does not mean "currently imaging". | "Currently imaging" requires `plan_started` **and** `capturing` (or the scheduled wait before the first frame). At the start of a night a stale flag no longer makes the agent adopt a stopped plan: it resets and restarts it. |
+| **A watchdog also counts the time it wasn't watching** | The "the plan hasn't progressed in N minutes" alert fired **right after the roof reopened**: during a weather pause the remaining work is frozen by construction and the watchdog doesn't run, so on return it found the same figure and subtracted a timestamp from before the closure. | The watchdog measures **only the minutes it actually watched**: if there is a gap between two passes (weather pause, agent down, VPN down) it starts over. This holds for any "X hasn't changed in N minutes" alert. |
+| **Plugs on, box dead** | A `shutdown` from the app with the power left on leaves the ASIAIR **powered but halted**: it answers nothing and there is no way to bring it back remotely. A night lost with nothing broken. | An automatic power cycle at the start of the night, on the ASIAIR outlet **only**, and only if the VPN is up (otherwise the silence proves nothing). One attempt per night; the mount is never powered off. |
 | **An interrupted plan won't restart** | `start_exposure` on a half-finished plan does nothing useful: it must be **reset** first. | `reset_plan()`, verified against `get_plan` (lapsed 0, left == total). |
 | **Ping is not enough to power down** | The Pi answers pings while the system is already dead: cutting power then corrupts the SD card, not cutting it leaves the rig powered all day. | Two-level check: ping **and** port 4700. If the app is down but ping still answers, 90 seconds of grace, then power off anyway. |
 | **Firmware floats** | You write an exposure of `8.19` s, read back `8.190001`, and an exact comparison fails. | Exposures rounded to one decimal, compared with a 5 ms tolerance. |
@@ -233,7 +307,7 @@ evening.
 
 ## Tests
 
-Twelve test scripts, **entirely offline**: no rig, no network, no NAS. They use
+Twenty test scripts, **entirely offline**: no rig, no network, no NAS. They use
 fake ASIAIRs, an in-memory fake Google Sheet and temporary sandboxes, and they
 cover the real failures that produced the safeguards listed above.
 
