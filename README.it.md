@@ -57,7 +57,10 @@ le stesse serate perse.
   panel motorizzato, **avvia il piano**.
 - Ogni 3 minuti: controlla che la ripresa proceda, aggiorna il diario e ogni 15
   minuti **sincronizza i FITS** sul NAS in modo incrementale (i punti fissi —
-  fine piano, meteo, flat, spegnimento — sincronizzano comunque).
+  fine piano, meteo, flat, spegnimento — sincronizzano comunque). Le passate
+  automatiche guardano solo i frame degli **ultimi N giorni**
+  (`sync_module.recent_days`), così ripulire il NAS dai file vecchi non li fa
+  riscaricare.
 - **Sorveglia il progresso vero**: non il flag "piano avviato", che resta acceso
   anche a piano fermo, ma il **residuo del piano**. Se non scende per 20 minuti
   avvisa su Telegram. È solo un avviso: una ripresa in corso non si tocca mai.
@@ -82,14 +85,31 @@ le stesse serate perse.
   la luminosità del pannello per gruppo e lancia un autorun per ciascuno con
   tempo di posa AUTO.
 - **Dark flat** subito dopo, a pannello spento, con la posa esatta calcolata dai
-  flat appena fatti.
-- Sync finale, `pi_shutdown`, attesa che il box sia **davvero** morto, e solo
-  allora stacca la corrente dalle prese smart.
+  flat appena fatti. Il cooler resta acceso fino all'ultimo dark; solo dopo il
+  rig va a riposo (cooler e scaldiglie spenti) mentre i file vengono copiati.
+- **Sync finale a passate**: 60 minuti, poi in automatico altri 30, con un
+  messaggio Telegram ogni 9 minuti col numero di file copiati finora. Se non
+  basta ancora **chiede** se continuare con altri 30 minuti: su una linea lenta
+  una copia lunga non è un errore, e il rig **non si spegne mai con il sync
+  incompleto** se non sei tu a dirlo.
+- `pi_shutdown`, attesa che il box sia **davvero** morto, e solo allora stacca
+  la corrente dalle prese smart.
 
 **Sempre**
 
 - **Bot Telegram** con menu a bottoni: stato, avvio, avvio piano, sync manuale,
   flat/dark a comando, spegnimento — tutte le operazioni pericolose con conferma.
+  Il sync manuale usa le stesse passate da 60 + 30 minuti e gli stessi messaggi
+  di avanzamento.
+- **Un sync alla volta**: bot e agente condividono un lock (`flock`), così due
+  copie non si contendono mai lo stesso mount. Chi arriva secondo non parte — la
+  passata notturna salta in silenzio, il sync dopo i flat aspetta, il bottone
+  risponde "già in corso". Se il processo muore, il kernel libera il lock.
+- **Vista per soggetto e per notte sul NAS**: accanto al mirror grezzo, un
+  secondo albero `soggetto/notte/light|flat|dark` con i flat e i dark dei filtri
+  e del gain di ciascun soggetto — fatto con **hardlink**, quindi niente occupa
+  spazio due volte (CIFS non accetta symlink). La cartella della notte porta il
+  giorno del **tuo** fuso orario (`folder_timezone`), non quello dell'osservatorio.
 - **Telemetria MQTT** verso Home Assistant: ~60 entità fra guida (RMS e picchi
   su finestra mobile), camera, fuoco, montatura, storage, temperatura CPU del
   box, assorbimento per singola presa e stazione meteo di sito con la stima
@@ -191,6 +211,7 @@ stessa API Alpaca del tetto. Senza, l'agente resta sul valore fisso.
 | `sfro_telegram.py` | Servizio persistente: bot con menu a bottoni e conferme. |
 | `sfro_sessionlog.py` | Diario: FITS → SQLite → Google Sheet + CSV. |
 | `sfro_report.py` | Dashboard HTML statistiche (file unico, niente CDN). |
+| `sfro_sessioni.py` | Vista soggetto × notte dei FITS sul NAS, con hardlink. |
 | `asiair_client.py` | Trasporto JSON-RPC verso l'ASIAIR (porte 4700 e 4400). |
 
 **Perché oneshot e non un demone**: un processo che gira per giorni accumula
@@ -294,6 +315,9 @@ Questo è il valore vero del progetto. Ogni riga qui sotto è una serata persa.
 | **Float del firmware** | Scrivi una posa di `8.19` s, la rileggi come `8.190001` e il confronto esatto fallisce. | Pose arrotondate a 1 decimale e confronto con tolleranza di 5 ms. |
 | **ASIAIR spento = socket zombie** | Il box spento non manda FIN/RST: la connessione di guida resta aperta per sempre e la telemetria muore **in silenzio**. | TCP keepalive + riconnessione forzata se il socket tace oltre N secondi. |
 | **`rsync` rc=24** | "File vanished": un FITS ancora in scrittura sull'ASIAIR. Trattarlo come errore fatale annullava tutto lo spegnimento. | Tollerato come avviso: il file si riprende al sync successivo. |
+| **Una linea lenta sembra un blocco** | A ~2 MB/s dal sito remoto, 12 GB di flat e dark richiedono ben più di un'ora. Ogni passata da 30 minuti arrivava al tetto, il bot diceva "errore" e si fermava, e senza nessun segnale in mezzo sembrava piantato — il server è stato riavviato per niente. | Passate lunghe (60 + 30 minuti, poi una domanda), output di rsync letto in diretta e un messaggio ogni 9 minuti col conteggio dei file. |
+| **Ripulire il mirror fa riscaricare tutto** | rsync rende la destinazione uguale alla sorgente: cancelli i flat vecchi sul NAS ma non sull'ASIAIR, e le passate dopo li ricopiano tutti — cinque ore di flat vecchi in coda **davanti** ai light della notte. | Si pulisce prima l'ASIAIR, poi il NAS. Le passate automatiche guardano comunque solo gli ultimi giorni (`recent_days`); il bottone del sync manuale no, per scelta. |
+| **Due sync sullo stesso mount** | Il sync manuale del bot e la passata periodica dell'agente possono partire insieme: ognuno monta e smonta la share, togliendola da sotto all'altro. | Un `flock` non bloccante: un sync alla volta, rilasciato dal kernel se chi lo tiene muore. |
 | **Tempo AUTO dei flat al tetto** | A gain 0 e pannello al 50% il tempo calcolato tocca il limite di 15 s e talvolta il calcolo **fallisce**: l'autorun non parte proprio. | Luminosità del pannello diversa per gain, così la posa cade in mezzo alla finestra utile. |
 | **L'ASIAIR ammucchia i frame** | Tutte le notti finiscono nella stessa cartella per tipo, e non è configurabile. | Lo smistamento per data lo fa il sync **in destinazione**, leggendo la data dal nome file. |
 | **Timeout systemd sugli oneshot** | È **disabilitato** di default: un ciclo appeso su una CIFS morta blocca il timer **per sempre**. | `TimeoutStartSec` esplicito nella unit. |
@@ -302,7 +326,7 @@ Questo è il valore vero del progetto. Ogni riga qui sotto è una serata persa.
 
 ## Test
 
-Venti script di test **completamente offline**: niente rig, niente rete,
+Ventuno script di test **completamente offline**: niente rig, niente rete,
 niente NAS. Usano finti ASIAIR, finti Google Sheet in memoria e sandbox
 temporanee, e coprono i guasti veri che hanno generato le contromisure qui
 sopra.

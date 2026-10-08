@@ -11,6 +11,7 @@ Nessun rig, nessuna rete: fake di AsiairControl/KASA/Telegram/sessionlog.
 import json
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -67,7 +68,8 @@ A.nautical_window = lambda now, loc, tz, dep=12: (KB["in_night"], None, None, KB
 A.vpn_diagnose = lambda host, probe="": {"vpn_up": True, "asiair_up": KB["asiair_ping"],
                                          "cause": ""}
 A.http_get_json = lambda u, h, session=None: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
-A.sync_pass = lambda sc, dry: (CALLS.append("sync"),
+A.sync_busy = lambda sc: None    # mai il lock di produzione nei test
+A.sync_pass = lambda sc, dry, cfg=None, **kw: (CALLS.append("sync"),
                                {"ok": True, "files": 7, "error": None})[1]
 A.time.sleep = lambda s: None
 
@@ -81,6 +83,8 @@ A.AsiairControl.set_camera_gain = (
 A.AsiairControl.camera_cooling = lambda self: KB["cooling"]
 A.AsiairControl.cooler_on = (
     lambda self: (CALLS.append("cooler_on"), KB["cooler_on_ok"])[1])
+A.AsiairControl.cooler_off = (
+    lambda self: (CALLS.append("cooler_off"), (True, ""))[1])
 A.AsiairControl.ensure_anti_dew = (
     lambda self: (CALLS.append("anti_dew"), (True, "acceso"))[1])
 A.AsiairControl.read_flat_exps = lambda self, idxs: {i: KB["exps"][i] for i in idxs}
@@ -202,6 +206,7 @@ assert bot_has(f"Asciugatura ~{int(cfg['flat_flow']['dry_wait_minutes'])} min"),
 assert bot_has("adatta alla condensa stimata"), BOT_MSGS
 req = json.loads(REQ.read_text())
 assert req["ask_shutdown"] and req["closed_ts"], req
+assert req["dry_wait"] is True, req          # default = con asciugatura
 
 # B1b: seconda pressione con richiesta gia' pendente -> non riparte
 bot_call("B1b doppia pressione", bot.do_flatdark, None)
@@ -236,7 +241,10 @@ assert state["flat_stage"] == "darks"
 cyc("A4 domanda spegnimento", flats_status=(True, False, 0, None, ""))
 assert "sync" in CALLS, CALLS
 assert "shutdown" not in CALLS and "kasa_off_all" not in CALLS, CALLS
-assert "set_output(dew_heater,5)" not in CALLS, CALLS   # la fascia anticondensa la mette il bot
+# dal 2026-09-08 cooler, anti-dew e fascia vanno a riposo PRIMA del sync, anche
+# nel flusso manuale: i frame sono finiti, la domanda riguarda solo la corrente
+assert CALLS.index("cooler_off") < CALLS.index("sync"), CALLS
+assert CALLS.index("set_output(dew_heater,5)") < CALLS.index("sync"), CALLS
 assert state["flat_stage"] == "ask_shutdown", state["flat_stage"]
 assert msg_has("Spengo l'ASIAIR e tolgo corrente"), MSGS
 kb = [k for k in KBS if k]
@@ -328,5 +336,56 @@ REQ.unlink()
 A.save_state(A.Path(cfg["state_file"]), {"flat_stage": "running"})
 bot_call("D4 flusso gia' in corso", bot.do_flatdark, None)
 assert bot_has("GIÀ in corso") and not REQ.exists(), BOT_MSGS
+
+# ------------------------------------- asciugatura FACOLTATIVA (2026-09-15) ---
+# F1: la conferma Flat/Dark offre «con asciugatura» / «parti subito» / «No»;
+# il tap su «parti subito» consuma la stessa conferma e scrive dry_wait=false
+A.save_state(A.Path(cfg["state_file"]), {})
+REQ.unlink(missing_ok=True)
+kb = T.CONFIRM_KB["flatdark"]
+assert [b["callback_data"] for row in kb for b in row] == \
+    ["c:flatdark", "c:flatdark_now", "c:no"], kb
+T.SfroBot.api = lambda self, *a, **kw: {}
+bot.chat_id = "42"
+SPAWNED = []
+bot.spawn = lambda name, fn, th: (SPAWNED.append(name), fn(th))
+KB.update(cooling=(True, 0.1, 0.0, True, ""), snap=snap(), night="2026-08-04",
+          flats_status=(True, True, 3000, "1/30", ""))
+NOW[0] = datetime(2026, 8, 4, 2, 4, tzinfo=tz)
+BOT_MSGS.clear()
+CALLS.clear()
+bot.pending[9] = ("flatdark", time.time())
+bot.on_callback({"id": "cb", "data": "c:flatdark_now",
+                 "message": {"chat": {"id": 42}, "message_id": 9}})
+print("### F1 conferma «Parti subito»")
+for m in BOT_MSGS:
+    print("   TG>", m.replace(chr(10), " | ")[:120])
+assert SPAWNED == ["Flat/Dark"], SPAWNED
+assert REQ.exists() and json.loads(REQ.read_text())["dry_wait"] is False
+assert bot_has("Asciugatura SALTATA"), BOT_MSGS
+assert "teardown(keep_cooler=True)" in CALLS, CALLS   # la parte del bot e' uguale
+
+# F2: l'agente prende in carico e fa partire i flat NELLO STESSO ciclo, senza
+# countdown; il verdetto condensa c'e' comunque (sensori HA), l'attesa e' 0
+state.clear()
+cyc("F2 presa in carico senza asciugatura",
+    now=datetime(2026, 8, 4, 2, 6, tzinfo=tz))
+assert state["dry_wait_effective"] == 0, state.get("dry_wait_effective")
+assert state.get("dew_verdict"), state
+assert msg_has("Asciugatura SALTATA") and not msg_has("Attesa Flats"), MSGS
+assert "start_flats" in CALLS and state["flat_stage"] == "running", CALLS
+
+# F3: il gate temperatura resta anche senza asciugatura
+state.clear()
+REQ.write_text(json.dumps({"ts": "x", "closed_ts": "2026-08-05T02:00:00-05:00",
+                           "source": "telegram", "ask_shutdown": True,
+                           "dry_wait": False, "cause": "flat_manuale"}))
+cyc("F3 senza asciugatura, camera calda", now=datetime(2026, 8, 5, 2, 2, tzinfo=tz),
+    night="2026-08-05", cooling=(True, 9.0, 0.0, True, ""))
+assert "start_flats" not in CALLS and state["flat_stage"] == "drying", CALLS
+assert msg_has("flat in attesa del raffreddamento"), MSGS
+cyc("F3b camera a temperatura", now=datetime(2026, 8, 5, 2, 5, tzinfo=tz),
+    cooling=(True, 0.2, 0.0, True, ""))
+assert "start_flats" in CALLS, CALLS
 
 print("\nTUTTI GLI SCENARI OK")

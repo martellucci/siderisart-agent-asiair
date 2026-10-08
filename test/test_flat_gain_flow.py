@@ -52,6 +52,7 @@ KB = dict(in_night=True, roof="OPEN", asiair_ping=True, night="2026-07-24",
           exps={0: 1.6, 2: 2.2, 4: 2.5, 5: 3.1},
           flats_status=(True, True, 3000, "12/30", ""),
           cooling=(True, 0.1, 0.0, True, ""), cooler_on_ok=(True, ""),
+          cooler_off_ok=(True, ""),
           set_output_ok=(True, ""), brightness_ok=(True, ""),
           slots_ok=(True, 30, "slot ok"), gain_ok=(True, ""),
           start_flats_ok=(True, ""), shutdown_ok=(True, ""),
@@ -60,7 +61,8 @@ KB = dict(in_night=True, roof="OPEN", asiair_ping=True, night="2026-07-24",
 A.nautical_window = lambda now, loc, tz, dep=12: (KB["in_night"], None, None, KB["night"])
 A.vpn_diagnose = lambda host, probe="": {"vpn_up": True, "cause": ""}
 A.http_get_json = lambda u, h, session=None: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
-A.sync_pass = lambda sc, dry: (CALLS.append("sync"),
+A.sync_busy = lambda sc: None    # mai il lock di produzione nei test
+A.sync_pass = lambda sc, dry, cfg=None, **kw: (CALLS.append("sync"),
                                {"ok": True, "files": 7, "error": None})[1]
 A.time.sleep = lambda s: None
 
@@ -73,6 +75,8 @@ A.AsiairControl.set_camera_gain = (
 A.AsiairControl.camera_cooling = lambda self: KB["cooling"]
 A.AsiairControl.cooler_on = (
     lambda self: (CALLS.append("cooler_on"), KB["cooler_on_ok"])[1])
+A.AsiairControl.cooler_off = (
+    lambda self: (CALLS.append("cooler_off"), KB["cooler_off_ok"])[1])
 A.AsiairControl.ensure_anti_dew = (
     lambda self: (CALLS.append("anti_dew"), (True, "acceso"))[1])
 A.AsiairControl.read_flat_exps = (
@@ -221,14 +225,19 @@ assert "gain(0)" in CALLS, CALLS
 assert "slots(dark,[2],exp={2: 2.2})" in CALLS, CALLS
 assert msg_has("Dark flat G (gain 0) avviati"), MSGS
 
-# N7: tutti i dark finiti -> sync, fascia anticondensa 5% (spenta), shutdown, KASA off
+# N7: tutti i dark finiti -> cooler+anti-dew off, fascia 5% (spenta), POI sync,
+# shutdown, KASA off. L'ordine e' quello dal 2026-09-08: a frame finiti niente
+# resta acceso durante l'rsync, che dura minuti.
 cyc("N7 chiusura", flats_status=(True, False, 0, None, ""))
 assert msg_has("Dark flat G (gain 0) completati"), MSGS
 assert "sync" in CALLS and "set_output(dew_heater,5)" in CALLS, CALLS
-i_sync, i_heat, i_shut = (CALLS.index("sync"),
-                          CALLS.index("set_output(dew_heater,5)"),
-                          CALLS.index("shutdown"))
-assert i_sync < i_heat < i_shut, CALLS
+assert "cooler_off" in CALLS, CALLS
+i_cool, i_heat, i_sync, i_shut = (CALLS.index("cooler_off"),
+                                  CALLS.index("set_output(dew_heater,5)"),
+                                  CALLS.index("sync"),
+                                  CALLS.index("shutdown"))
+assert i_cool < i_heat < i_sync < i_shut, CALLS
+assert msg_has("Cooler e anti-dew della camera spenti"), MSGS
 assert "kasa_off_all" in CALLS and state.get("flat_stage") == "done"
 
 # N8: STESSO filtro con DUE gain (G a 0 e 100) -> due passate flat e due dark
@@ -314,5 +323,125 @@ assert state.get("flat_cool_ts")
 cyc("N11d timeout -> STOP", now=datetime(2026, 7, 28, 13, 45, tzinfo=tz))
 assert state.get("flat_stage") == "error", state.get("flat_stage")
 assert msg_has("NON a temperatura"), MSGS
+
+# N12: SYNC FINALE A PASSATE (2026-09-15, tempi rivisti 2026-10-08). Un tetto
+# scaduto con ASIAIR raggiungibile deve RIPRENDERE al ciclo dopo: prima
+# passata 60', seconda 30'; ogni passata riceve progress (avanzamento 9').
+SYNC_Q, SYNC_KW = [], []
+
+
+def _sync_stub(sc, dry, cfg=None, **kw):
+    CALLS.append("sync")
+    SYNC_KW.append(kw)
+    return SYNC_Q.pop(0) if SYNC_Q else {"ok": True, "files": 7, "copied": 5,
+                                         "error": None}
+
+
+A.sync_pass = _sync_stub
+CAP = {"ok": False, "files": 0, "copied": 40, "cap": True,
+       "error": "tempo massimo del sync esaurito (60 min) con l'ASIAIR raggiungibile"}
+# file di risposta in una cartella temporanea: MAI quello di produzione
+import tempfile                                                   # noqa: E402
+cfg["flat_sync_reply_file"] = str(A.Path(tempfile.mkdtemp()) / "sync_reply.json")
+SSREP = A.Path(cfg["flat_sync_reply_file"])
+
+
+def fino_ai_dark(day):
+    state.clear()
+    KB.update(filters_gains=[("L", 100)], exps={0: 1.6},
+              cooling=(True, 0.1, 0.0, True, ""),
+              flats_status=(True, True, 3000, "12/30", ""))
+    cyc(f"ripresa {day}", now=datetime(2026, 7, day, 5, 0, tzinfo=tz),
+        in_night=True, night=f"2026-07-{day}", snap=snap(started=True))
+    cyc("alba", now=datetime(2026, 7, day, 12, 40, tzinfo=tz), in_night=False)
+    cyc("gruppo L", now=datetime(2026, 7, day, 13, 11, tzinfo=tz))
+    cyc("-> dark", flats_status=(True, False, 0, None, ""))
+    assert state.get("flat_stage") == "darks", state.get("flat_stage")
+
+
+fino_ai_dark(29)
+SYNC_Q[:] = [dict(CAP)]
+SYNC_KW.clear()
+cyc("N12a dark finiti, sync oltre il tetto", flats_status=(True, False, 0, None, ""))
+assert state["flat_stage"] == "sync" and state["flat_sync_passes"] == 1, state
+assert SYNC_KW[0]["cap_minutes"] == 60 and callable(SYNC_KW[0]["progress"]), SYNC_KW
+assert "cooler_off" in CALLS and "shutdown" not in CALLS, CALLS
+assert msg_has("seconda passata di 30") and not msg_has("INTERROTTO"), MSGS
+# l'avanzamento passato dall'agente produce il messaggio coi file copiati
+SYNC_KW[0]["progress"]({"copied": 12, "bytes": 626_000_000}, 540)
+assert msg_has("12 file copiati finora") and msg_has("in 9'"), MSGS[-1]
+cyc("N12b seconda passata completa", now=datetime(2026, 7, 29, 14, 0, tzinfo=tz))
+assert SYNC_KW[1]["cap_minutes"] == 30, SYNC_KW
+assert "cooler_off" not in CALLS, CALLS            # il riposo non si ripete
+assert CALLS.index("sync") < CALLS.index("shutdown"), CALLS
+assert "kasa_off_all" in CALLS and state.get("flat_stage") == "done", CALLS
+assert msg_has("2 passate") and msg_has("45 file") and "flat_sync_passes" not in state, MSGS
+
+# N13: 60'+30' non bastano -> si CHIEDE (ask_sync), niente spegnimento
+fino_ai_dark(30)
+SYNC_Q[:] = [dict(CAP), dict(CAP)]
+cyc("N13a passata 1", flats_status=(True, False, 0, None, ""))
+cyc("N13b passata 2", now=datetime(2026, 7, 30, 14, 15, tzinfo=tz))
+assert state.get("flat_stage") == "ask_sync", state.get("flat_stage")
+assert msg_has("Continuo con altri 30 minuti") and msg_has("80 file"), MSGS
+assert "shutdown" not in CALLS and "kasa_off_all" not in CALLS, CALLS
+# N13c: risposta "altri 30'" -> terza passata da 30' nello stesso ciclo, finita
+SSREP.parent.mkdir(parents=True, exist_ok=True)
+SSREP.write_text('{"answer": "more"}')
+SYNC_KW.clear()
+cyc("N13c altri 30'", now=datetime(2026, 7, 30, 14, 20, tzinfo=tz))
+assert SYNC_KW and SYNC_KW[0]["cap_minutes"] == 30, SYNC_KW
+assert not SSREP.exists() and state.get("flat_stage") == "done", state.get("flat_stage")
+assert "shutdown" in CALLS and msg_has("3 passate") and msg_has("85 file"), MSGS
+
+# N13d: di nuovo 60'+30' non bastano, risposta "basta cosi'" -> si spegne
+# comunque (scelta dell'utente), con l'avviso dei file rimasti sull'ASIAIR
+fino_ai_dark(27)
+SYNC_Q[:] = [dict(CAP), dict(CAP)]
+cyc("N13d passata 1", flats_status=(True, False, 0, None, ""))
+cyc("N13d passata 2", now=datetime(2026, 7, 27, 14, 15, tzinfo=tz))
+assert state.get("flat_stage") == "ask_sync", state.get("flat_stage")
+SSREP.write_text('{"answer": "stop"}')
+cyc("N13d basta cosi'", now=datetime(2026, 7, 27, 14, 20, tzinfo=tz))
+assert CALLS.count("sync") == 0, CALLS
+assert msg_has("INCOMPLETO su tua richiesta") and "shutdown" in CALLS, MSGS
+assert state.get("flat_stage") == "done", state.get("flat_stage")
+
+# N13e: nessuna risposta -> promemoria, poi oltre il timeout STOP a rig acceso
+fino_ai_dark(26)
+SYNC_Q[:] = [dict(CAP), dict(CAP)]
+cyc("N13e passata 1", flats_status=(True, False, 0, None, ""))
+cyc("N13e passata 2", now=datetime(2026, 7, 26, 14, 15, tzinfo=tz))
+cyc("N13e promemoria", now=datetime(2026, 7, 26, 14, 30, tzinfo=tz))
+assert msg_has("Aspetto ancora la risposta sul sync"), MSGS
+cyc("N13e timeout", now=datetime(2026, 7, 26, 15, 30, tzinfo=tz))
+assert state.get("flat_stage") == "error", state.get("flat_stage")
+assert msg_has("NON spengo") and msg_has("INTERROTTO"), MSGS
+assert "shutdown" not in CALLS and "kasa_off_all" not in CALLS, CALLS
+
+# N13f: BLOCCO DEL SYNC (2026-10-08) — dark finiti mentre un Rsync dal menu'
+# sta copiando: il flusso aspetta (passata non contata, avviso UNA volta) e
+# riparte quando il lock si libera
+fino_ai_dark(25)
+A.sync_busy = lambda sc: "Rsync dal menù Telegram"
+cyc("N13f Rsync del bot in corso", flats_status=(True, False, 0, None, ""))
+assert state.get("flat_stage") == "sync" and "sync" not in CALLS, CALLS
+assert msg_has("in attesa: è in corso il Rsync dal menù Telegram"), MSGS
+assert not state.get("flat_sync_passes"), state.get("flat_sync_passes")
+cyc("N13f ancora occupato", now=datetime(2026, 7, 25, 14, 0, tzinfo=tz))
+assert not MSGS and "sync" not in CALLS, (MSGS, CALLS)       # niente ripetizioni
+A.sync_busy = lambda sc: None
+SYNC_KW.clear()
+cyc("N13f lock libero", now=datetime(2026, 7, 25, 14, 3, tzinfo=tz))
+assert SYNC_KW[0]["cap_minutes"] == 60, SYNC_KW                # passata 1 vera
+assert state.get("flat_stage") == "done" and "flat_sync_wait_ts" not in state, state
+
+# N14: errore VERO (VPN giu', non tetto) -> STOP subito alla prima passata
+fino_ai_dark(31)
+SYNC_Q[:] = [{"ok": False, "files": 0,
+              "error": "comando oltre il tempo massimo (rsync, 232s): VPN caduta durante il sync?"}]
+cyc("N14 VPN caduta", flats_status=(True, False, 0, None, ""))
+assert state.get("flat_stage") == "error", state.get("flat_stage")
+assert "shutdown" not in CALLS, CALLS
 
 print("\nTUTTI I TEST FLAT-GAIN-FLOW: OK")

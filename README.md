@@ -58,7 +58,9 @@ evenings.
   flat panel, **starts the plan**.
 - Every 3 minutes: verifies imaging is progressing and updates the session log;
   every 15 minutes it **syncs FITS** to the NAS incrementally (the fixed points —
-  end of plan, weather, flats, shutdown — always sync).
+  end of plan, weather, flats, shutdown — always sync). Automatic passes only
+  look at the **last N days** of frames (`sync_module.recent_days`), so cleaning
+  old files off the NAS doesn't make them download again.
 - **Watches real progress**: not the "plan started" flag, which stays on even
   with the plan stopped, but the **plan's remaining work**. If it doesn't go down
   for 20 minutes, you get a Telegram alert. It is only an alert: an exposure in
@@ -83,14 +85,30 @@ evenings.
   session log which filters you shot and at what gain, groups them, sets panel
   brightness per group and runs one autorun for each, with AUTO exposure.
 - **Dark flats** immediately after, panel off, at exactly the exposure computed
-  from the flats it just took.
-- Final sync, `pi_shutdown`, waits until the box is **actually** dead, and only
-  then cuts power at the smart plugs.
+  from the flats it just took. The cooler stays on until the last dark; only
+  then does the rig rest (cooler and heaters off) while the files are copied.
+- **Final sync in passes**: 60 minutes, then automatically another 30, with a
+  Telegram message every 9 minutes counting the files copied so far. If it still
+  isn't done it **asks** whether to go on for another 30 minutes: on a slow link
+  a long copy is not an error, and the rig is **never powered down with an
+  incomplete sync** unless you say so.
+- `pi_shutdown`, waits until the box is **actually** dead, and only then cuts
+  power at the smart plugs.
 
 **Always**
 
 - **Telegram bot** with a button menu: status, power-on, start plan, manual sync,
   on-demand flats/darks, shutdown — every dangerous action behind a confirmation.
+  The manual sync uses the same 60 + 30 minute passes and progress messages.
+- **One sync at a time**: the bot and the agent share a lock (`flock`), so two
+  copies never fight over the same mount. Whoever arrives second doesn't start —
+  the night pass skips silently, the post-flat sync waits, the button says
+  "already running". The kernel releases the lock if the process dies.
+- **Per-target, per-night view on the NAS**: next to the raw mirror, a second
+  tree `target/night/light|flat|dark` with the flats and darks matching each
+  target's filters and gain — built with **hardlinks**, so nothing takes space
+  twice (CIFS doesn't allow symlinks). The night folder is named after the day
+  in **your** time zone (`folder_timezone`), not the observatory's.
 - **MQTT telemetry** to Home Assistant: ~60 entities covering guiding (RMS and
   peaks over a moving window), camera, focus, mount, storage, the box's CPU
   temperature, per-outlet power draw and the site weather station with its dew
@@ -192,6 +210,7 @@ the same Alpaca API as the roof. Without one, the agent stays on the fixed value
 | `sfro_telegram.py` | Long-running service: Telegram bot with button menu and confirmations. |
 | `sfro_sessionlog.py` | Session log: FITS → SQLite → Google Sheet + CSV. |
 | `sfro_report.py` | HTML statistics dashboard (single file, no CDN). |
+| `sfro_sessioni.py` | Per-target × night view of the FITS on the NAS, with hardlinks. |
 | `asiair_client.py` | JSON-RPC transport to the ASIAIR (ports 4700 and 4400). |
 
 **Why oneshot instead of a daemon**: a process that runs for days accumulates
@@ -299,6 +318,9 @@ evening.
 | **Firmware floats** | You write an exposure of `8.19` s, read back `8.190001`, and an exact comparison fails. | Exposures rounded to one decimal, compared with a 5 ms tolerance. |
 | **A powered-off ASIAIR is a zombie socket** | The box sends no FIN/RST when it dies: the guiding connection stays open forever and telemetry dies **silently**. | TCP keepalive plus a forced reconnect if the socket goes quiet beyond N seconds. |
 | **`rsync` rc=24** | "File vanished": a FITS still being written on the ASIAIR. Treating it as fatal aborted the entire shutdown. | Tolerated as a warning: the file is picked up on the next sync. |
+| **A slow link looks like a hang** | At ~2 MB/s from the remote site, 12 GB of flats and darks need well over an hour. Each 30-minute pass hit its time cap, the bot reported "error" and stopped, and with no output in between it looked frozen — the server got rebooted for nothing. | Long passes (60 + 30 minutes, then a question), rsync output streamed live, and a progress message every 9 minutes with the file count. |
+| **Cleaning the mirror re-downloads everything** | rsync makes the destination match the source: delete old flats on the NAS but not on the ASIAIR, and the next passes copy them all back — five hours of old flats queued **ahead of** the night's lights. | Clean the ASIAIR first, then the NAS. Automatic passes only look at the last few days anyway (`recent_days`); the manual sync button doesn't, by design. |
+| **Two syncs on the same mount** | The bot's manual sync and the agent's periodic pass can run at once: each mounts and unmounts the share, pulling it out from under the other. | A non-blocking `flock`: one sync at a time, released by the kernel if the holder dies. |
 | **AUTO flat exposure hits the ceiling** | At gain 0 with the panel at 50%, the computed exposure clamps at 15 s and sometimes the calculation **fails outright**: the autorun never starts. | Per-gain panel brightness, so the exposure lands in the middle of the usable window. |
 | **The ASIAIR piles everything together** | Every night's frames land in the same folder per type, and it isn't configurable in the app. | Sorting by date is done by the sync **at the destination**, reading the date from the filename. |
 | **systemd timeout on oneshot units** | It is **disabled** by default: one cycle hung on a dead CIFS mount blocks the timer **forever**. | An explicit `TimeoutStartSec` in the unit. |
@@ -307,7 +329,7 @@ evening.
 
 ## Tests
 
-Twenty test scripts, **entirely offline**: no rig, no network, no NAS. They use
+Twenty-one test scripts, **entirely offline**: no rig, no network, no NAS. They use
 fake ASIAIRs, an in-memory fake Google Sheet and temporary sandboxes, and they
 cover the real failures that produced the safeguards listed above.
 

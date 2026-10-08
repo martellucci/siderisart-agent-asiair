@@ -200,7 +200,8 @@ A.nautical_window = lambda now, loc, tz, dep=12: (KB["in_night"], None, None,
 A.vpn_diagnose = lambda host, probe="": {"vpn_up": True,
                                          "asiair_up": KB["asiair_ping"], "cause": ""}
 A.http_get_json = lambda u, h, session=None: {"Value": KB["roof"] == "OPEN", "ErrorNumber": 0}
-A.sync_pass = lambda sc, dry: (CALLS.append("sync"), dict(SYNC))[1]
+A.sync_busy = lambda sc: None    # mai il lock di produzione nei test
+A.sync_pass = lambda sc, dry, cfg=None, **kw: (CALLS.append("sync"), dict(SYNC))[1]
 A.time.sleep = lambda s: None
 A.AsiairControl.snapshot = lambda self: KB["snap"]
 A.AsiairControl.start = lambda self, snap=None: (CALLS.append("plan_start"),
@@ -283,13 +284,20 @@ cyc("C6 sync in errore", 15, snap=snap())
 assert has("sync") and any("Sync FITS in errore" in m for m in MSGS), MSGS
 cyc("C7 ciclo dopo l'errore: si rispetta la cadenza", 3, snap=snap())
 assert not has("sync"), CALLS
+# C7b: BLOCCO DEL SYNC (2026-10-08) — un Rsync dal menu' sta copiando: la
+# passata periodica non parte e NON manda avvisi di errore
+SYNC.update(files=0, ok=False, busy="Rsync dal menù Telegram",
+            error="c'è già un sync in corso (Rsync dal menù Telegram)")
+cyc("C7b sync occupato dal bot", 12, snap=snap())
+assert has("sync") and not any("Sync" in m for m in MSGS), MSGS
+SYNC.pop("busy")
 SYNC.update(files=7, error=None, ok=True)
 
 # C8: PUNTO FISSO — chiusura meteo durante la ripresa: il sync finale parte
 # comunque, cadenza o non cadenza, e riallinea il timestamp
 cyc("C8 tetto chiuso dal meteo (sync fisso)", 3, roof="CLOSED", snap=snap())
 assert has("sync"), CALLS
-assert state["last_sync_ts"].startswith("2026-08-15T03:51"), state["last_sync_ts"]
+assert state["last_sync_ts"].startswith("2026-08-15T04:03"), state["last_sync_ts"]  # +12 di C7b
 assert state.get("weather_closed"), state
 
 # C9: nuova notte -> lo stato si azzera e la prima ripresa sincronizza subito

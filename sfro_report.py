@@ -48,6 +48,7 @@ DEFAULTS = {
     "logo": "logo.png",         # marchio in testata; relativo alla dir dello script.
                                 # Incorporato nella pagina (resta un file solo).
     "brand": "Sideris Art · Fine Art Astrophotography",
+    "app_url": "/deepsky/",     # "‹ Deep Sky Planner" in testata riporta all'app
 }
 
 # Colori per filtro: L/R/G/B e la banda stretta SHO.
@@ -468,7 +469,7 @@ def svg_series(nights, key, limit, color, unit="", lo=None, hi=None) -> str:
         v = float(n[key])
         fuori = v > vmax
         p.append(f"<circle cx='{PL+i*dx:.1f}' cy='{y(v):.1f}' r='{4.2 if fuori else 3.2}' "
-                 f"fill='{'#e0503a' if fuori else color}'><title>{esc(n['id'])}: "
+                 f"fill='{'#d4675e' if fuori else color}'><title>{esc(n['id'])}: "
                  f"{v:.2f}{unit}{' (fuori scala)' if fuori else ''}</title></circle>")
         if i in tick:
             p.append(f"<text x='{PL+i*dx:.1f}' y='{H-PB+18}' class='ax am'>"
@@ -499,7 +500,7 @@ def svg_hist(vals, thr) -> str:
     for i, b in enumerate(bins):
         h = plot * b / mx
         x = PL + i * bw
-        col = "#e0503a" if i * step >= thr else "#4bbf73"
+        col = "#d4675e" if i * step >= thr else "#6cbf8e"
         p.append(f"<rect x='{x:.1f}' y='{PT+plot-h:.1f}' width='{bw*.86:.1f}' "
                  f"height='{max(0.5,h):.1f}' fill='{col}' opacity='.85'>"
                  f"<title>{i*step:.2f}–{(i+1)*step:.2f}\": {b} frame</title></rect>")
@@ -515,122 +516,125 @@ def svg_hist(vals, thr) -> str:
 # Pagina
 # --------------------------------------------------------------------------- #
 CSS = """
-/* Palette Sideris Art, la stessa del Deep Sky Planner: blu notte + oro.
-   I font del planner (EB Garamond, DM Mono) arrivano da Google: qui la pagina
-   deve restare autonoma e raggiungibile in VPN, quindi si dichiarano lo stesso
-   ma con ripieghi locali di famiglia compatibile (Georgia, monospace).
-   Gli accenti dato (blu/verde/ambra/rosso) sono la versione schiarita di quelli
-   del planner: li' vivono su tabella chiara, qui su blu notte. */
+/* Grafica del Deep Sky Planner v3 (ottobre 2026): una sola superficie scura,
+   niente riquadri pieni — le sezioni si separano con lo spazio e con linee
+   sottili —, l'oro Sideris come unico accento, verde/ambra/rosso solo per i
+   giudizi. EB Garamond per titoli e numeri grandi, carattere di sistema per i
+   dati, con cifre tabulari perche' le colonne restino incolonnate.
+   La pagina resta autonoma (niente CDN): Garamond e' dichiarato con ripiego
+   su Georgia, come prima. I contenuti sono invariati: cambia solo la veste. */
 :root{
---bg:#071535;--pan:#0a1c3e;--pan2:#0e2348;--pan3:#12294f;
---tx:#e8d9b0;--mut:rgba(245,230,184,.65);--mut2:rgba(245,230,184,.38);
---bd:rgba(245,230,184,.15);--bd2:rgba(245,230,184,.28);
---gold:#f5e6b8;--gold-dark:#c9a84c;
---acc:#6f9ee8;--ok:#4bbf73;--warn:#f2b134;--bad:#e0503a;
---sans:'EB Garamond',Georgia,'Times New Roman',serif;
---mono:'DM Mono',ui-monospace,'SF Mono',Menlo,Consolas,monospace}
+--bg:#070b15;--pan:#0b1120;--pan2:#111a2e;--pan3:#162038;
+--tx:#ece6d6;--mut:rgba(236,230,214,.64);--mut2:rgba(236,230,214,.40);
+--bd:rgba(233,220,186,.09);--bd2:rgba(233,220,186,.17);
+--gold:#e3cf9a;--gold-dark:#c9a84c;--gold-f:rgba(227,207,154,.10);
+--acc:#8fa9cf;--ok:#6cbf8e;--warn:#d9ad4f;--bad:#d4675e;
+--serif:'EB Garamond',Georgia,'Times New Roman',serif;
+--sans:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',Helvetica,Arial,sans-serif;
+--mono:var(--sans)}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--tx);
-font:16px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
-/* largo quanto lo schermo (le tabelle hanno 14 colonne: a 1180px si tagliavano) */
-.wrap{max-width:min(1760px,97vw);margin:0 auto;padding:0 18px 60px}
-/* ── testata: logo + marchio, come il planner ── */
-.mast{display:flex;align-items:center;gap:16px;flex-wrap:wrap;
-padding:20px 0 16px;border-bottom:1px solid var(--bd);margin-bottom:24px}
-.mast img{width:62px;height:62px;flex-shrink:0;object-fit:contain;border-radius:8px}
-.brand{font-family:var(--mono);font-size:9px;letter-spacing:2.5px;color:var(--mut2);
-text-transform:uppercase;margin-bottom:3px}
-h1{font-size:clamp(19px,3.4vw,26px);font-weight:500;color:var(--gold);
-letter-spacing:.3px;line-height:1.1;margin:0}
-.sub{font-family:var(--mono);font-size:10px;letter-spacing:1.4px;color:var(--mut2);
-margin-top:4px;text-transform:uppercase}
-h2{font-size:19px;font-weight:500;color:var(--gold);margin:36px 0 12px;
-padding-bottom:8px;border-bottom:1px solid var(--bd);letter-spacing:.2px}
-.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(158px,1fr));gap:12px}
-.kpi{background:var(--pan);border:1px solid var(--bd);border-radius:10px;padding:14px 16px}
-.kpi .v{font-family:var(--mono);font-size:26px;font-weight:500;color:var(--gold);
-letter-spacing:-.5px;line-height:1.2}
-.kpi .k{font-family:var(--mono);color:var(--mut2);font-size:9px;
-text-transform:uppercase;letter-spacing:1.6px;margin-bottom:5px}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 var(--sans);
+font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.wrap{max-width:min(1760px,100%);margin:0 auto;padding:0 clamp(16px,3vw,40px) 60px}
+/* ── barra in alto, come nell'app: ritorno al planner ── */
+.topnav{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:12px;
+height:calc(env(safe-area-inset-top,0px) + 52px);padding:env(safe-area-inset-top,0px) clamp(16px,3vw,40px) 0;
+margin:0 calc(-1*clamp(16px,3vw,40px));background:rgba(7,11,21,.86);
+backdrop-filter:saturate(1.4) blur(18px);-webkit-backdrop-filter:saturate(1.4) blur(18px);
+border-bottom:1px solid var(--bd)}
+.topnav a{color:var(--gold);text-decoration:none;font-size:16px}
+.topnav a:hover{opacity:.8}
+.topnav span{margin-left:auto;font-size:12.5px;color:var(--mut2)}
+/* ── testata ── */
+.mast{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:26px 0 6px}
+.mast img{width:52px;height:52px;flex-shrink:0;object-fit:contain;opacity:.9}
+.brand{font-size:12px;color:var(--mut2);margin-bottom:2px}
+h1{font-family:var(--serif);font-size:clamp(28px,4vw,36px);font-weight:500;color:var(--tx);
+line-height:1.1;margin:0}
+.sub{font-size:13px;color:var(--mut2);margin-top:6px}
+h2{font-family:var(--serif);font-size:23px;font-weight:400;color:var(--gold);margin:46px 0 12px}
+/* KPI: numeri grandi in serif, senza riquadro */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:22px 18px;
+margin-top:22px;padding:18px 0 4px;border-top:1px solid var(--bd)}
+.kpi .v{font-family:var(--serif);font-size:44px;font-weight:400;color:var(--tx);line-height:1.05}
+.kpi .k{color:var(--mut2);font-size:12.5px;margin-bottom:2px}
 .kpi .n{color:var(--mut);font-size:13px;margin-top:3px}
-.card{background:var(--pan);border:1px solid var(--bd);border-radius:10px;
-padding:14px;overflow-x:auto}
-.due{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+/* i blocchi non sono piu' scatole: solo una linea sopra */
+.card{border-top:1px solid var(--bd);padding:12px 0 6px;overflow-x:auto}
+.card+.card{margin-top:10px}
+.due{display:grid;grid-template-columns:1fr 1fr;gap:10px 34px}
 @media(max-width:820px){.due{grid-template-columns:1fr}}
 .chart{width:100%;height:auto;display:block;min-width:560px}
-.grid{stroke:rgba(245,230,184,.10);stroke-width:1}
+.grid{stroke:rgba(236,230,214,.08);stroke-width:1}
 .dark{fill:var(--pan3)}
 .soglia{stroke:var(--bad);stroke-width:1.4;stroke-dasharray:5 4}
-.target{stroke:var(--gold-dark);stroke-width:2}
-.ax{fill:var(--mut2);font-size:11px;font-family:var(--mono)}
+.target{stroke:var(--gold);stroke-width:2}
+.ax{fill:var(--mut2);font-size:11px;font-family:var(--sans)}
 .am{text-anchor:middle}.ar{text-anchor:end}
-.lbl{fill:var(--tx);font-size:12.5px}
-.inb{fill:#071535;font-size:11px;font-weight:700;text-anchor:middle;
-font-family:var(--mono)}
+.lbl{fill:var(--tx);font-size:13px;font-family:var(--sans)}
+.inb{fill:#070b15;font-size:11px;font-weight:600;text-anchor:middle;font-family:var(--sans)}
 table{border-collapse:collapse;width:100%;font-size:14px;min-width:560px}
-th,td{padding:8px 10px;text-align:right;border-bottom:1px solid var(--bd);
-white-space:nowrap}
-/* i numeri in mono: incolonnati si leggono, e richiamano i valori del planner */
-td{font-family:var(--mono);font-size:13px}
-td.l{font-family:var(--sans);font-size:14.5px}
-th{position:sticky;top:0;background:var(--pan2);color:var(--mut2);font-weight:400;
-font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:1.3px;
+th,td{padding:9px 10px;text-align:right;border-bottom:1px solid var(--bd);white-space:nowrap}
+td{font-size:13.5px}
+td.l{font-size:14px}
+td.l:first-child{font-family:var(--serif);font-size:17px}
+th{position:sticky;top:0;background:var(--bg);color:var(--mut2);font-weight:400;font-size:12px;
 cursor:pointer;border-bottom:1px solid var(--bd2)}
+th:hover{color:var(--tx)}
 th:first-child,td:first-child,.l{text-align:left}
-tbody tr:hover{background:var(--pan2)}
-.tag{display:inline-block;padding:2px 8px;border-radius:20px;font-size:10px;
-font-family:var(--mono);letter-spacing:.4px;border:1px solid var(--bd);color:var(--mut)}
-.f{display:inline-block;width:19px;text-align:center;border-radius:4px;
-font-size:11px;font-weight:700;color:#071535;margin-right:2px;font-family:var(--mono)}
-.bar{height:6px;border-radius:3px;background:var(--pan3);overflow:hidden;min-width:52px}
+tbody tr:hover{background:rgba(255,255,255,.025)}
+.tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;
+border:1px solid var(--bd2);color:var(--mut)}
+.f{display:inline-block;width:19px;text-align:center;border-radius:5px;
+font-size:11px;font-weight:600;color:#070b15;margin-right:2px}
+.bar{height:4px;border-radius:2px;background:var(--bd2);overflow:hidden;min-width:52px}
 .bar>i{display:block;height:100%}
-.vuoto{color:var(--mut2);font-size:13px;margin:8px 2px}
-details{margin:9px 0}
-summary{cursor:pointer;color:var(--gold-dark);font-size:14px;padding:5px 0}
+.vuoto{color:var(--mut2);font-size:13px;margin:8px 0}
+details{margin:6px 0;border-bottom:1px solid var(--bd)}
+summary{cursor:pointer;color:var(--tx);font-size:15px;padding:10px 0;list-style:none;
+display:flex;justify-content:space-between}
+summary::-webkit-details-marker{display:none}
+summary::after{content:'\\203A';color:var(--mut2);font-size:19px;line-height:1;transition:transform .2s}
+details[open]>summary::after{transform:rotate(90deg)}
 summary:hover{color:var(--gold)}
 .scroll{max-height:460px;overflow:auto}
-footer{color:var(--mut2);font-size:12px;margin-top:36px;border-top:1px solid var(--bd);
-padding-top:14px}
-.leg{color:var(--mut);font-size:13px;margin:6px 2px 0}
+footer{color:var(--mut2);font-size:12px;margin-top:46px;border-top:1px solid var(--bd);padding-top:14px}
+.leg{color:var(--mut);font-size:13px;margin:8px 0 0;line-height:1.55}
+.leg b{color:var(--tx);font-weight:500}
+code{font-size:12.5px;color:var(--mut)}
 /* ── piano di acquisizione ──────────────────────────────────────────────────
    Semaforo sul TEMPO, non sugli scatti: se la sub cambia in campo il conteggio
    frame mente (NGC7635, R a 60s invece di 120s: 112 scatti su 60 previsti ma
    meno tempo del piano). La finestra e' HTML gia' impaginato dal server, non
    un template JS: la pagina deve restare un file solo, senza nulla da fuori. */
-.dot{display:inline-block;width:9px;height:9px;border-radius:50%;
-flex:0 0 auto;vertical-align:middle}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;flex:0 0 auto;vertical-align:middle}
 .pi-cell{display:flex;align-items:center;gap:7px;justify-content:flex-end}
 .pi-cell .bar{flex:1 1 46px}
-a.pi-open{color:var(--tx);text-decoration:none;cursor:pointer;
-border-bottom:1px dotted var(--bd2)}
+a.pi-open{color:var(--tx);text-decoration:none;cursor:pointer;border-bottom:1px dotted var(--bd2)}
 a.pi-open:hover{color:var(--gold);border-bottom-color:var(--gold-dark)}
 .pi-none{color:var(--mut2)}
 .pi-back{position:fixed;inset:0;z-index:90;display:none;overflow:auto;
-background:rgba(3,8,22,.8);padding:24px 14px}
+background:rgba(0,0,0,.55);padding:24px 14px}
 .pi-back.on{display:block}
-.pi-win{background:var(--pan);border:1px solid var(--bd2);border-radius:12px;
-width:min(960px,100%);margin:0 auto;box-shadow:0 18px 60px rgba(0,0,0,.6)}
-.pi-head{display:flex;align-items:flex-start;gap:14px;padding:16px 18px 12px;
-border-bottom:1px solid var(--bd)}
-.pi-head h3{margin:0;font-size:20px;font-weight:500;color:var(--gold);
-font-family:var(--sans);letter-spacing:.2px}
-.pi-src{font-family:var(--mono);font-size:10px;letter-spacing:1.1px;
-color:var(--mut2);text-transform:uppercase;margin-top:5px}
-.pi-x{margin-left:auto;background:none;border:1px solid var(--bd);color:var(--mut);
-border-radius:7px;font-size:19px;line-height:1;padding:4px 10px;cursor:pointer}
-.pi-x:hover{color:var(--gold);border-color:var(--bd2)}
-.pi-tot{padding:14px 18px;border-bottom:1px solid var(--bd);background:var(--pan2)}
-.pi-tot .r1{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-font-family:var(--mono);font-size:13px}
-.pi-tot .pc{font-size:25px;color:var(--gold);letter-spacing:-.5px}
-.pi-tot .bar{height:9px;margin-top:10px}
-.pi-body{padding:4px 18px 18px;overflow-x:auto}
+.pi-win{background:#121a2c;border-radius:16px;width:min(960px,100%);margin:0 auto;
+box-shadow:0 18px 60px rgba(0,0,0,.6)}
+.pi-head{display:flex;align-items:flex-start;gap:14px;padding:18px 20px 12px;border-bottom:1px solid var(--bd)}
+.pi-head h3{margin:0;font-family:var(--serif);font-size:24px;font-weight:500;color:var(--tx)}
+.pi-src{font-size:12px;color:var(--mut2);margin-top:4px}
+.pi-x{margin-left:auto;background:none;border:none;color:var(--mut);border-radius:16px;
+font-size:20px;line-height:1;width:32px;height:32px;cursor:pointer}
+.pi-x:hover{color:var(--gold);background:var(--gold-f)}
+.pi-tot{padding:14px 20px;border-bottom:1px solid var(--bd)}
+.pi-tot .r1{display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:13.5px}
+.pi-tot .pc{font-family:var(--serif);font-size:32px;color:var(--tx)}
+.pi-tot .bar{height:5px;margin-top:10px}
+.pi-body{padding:4px 20px 18px;overflow-x:auto}
 .pi-body table{min-width:660px}
-.pi-body th{cursor:default}          /* qui non si ordina: e' l'ordine del piano */
+.pi-body th{cursor:default;background:#121a2c}   /* qui non si ordina: e' l'ordine del piano */
+.pi-body td.l:first-child{font-family:var(--sans);font-size:14px}
 .pi-body th.sep,.pi-body td.sep{border-left:1px solid var(--bd)}
-.pi-body tr.grp th{position:static;background:none;border-bottom:none;
-color:var(--gold-dark);letter-spacing:1.6px;padding-bottom:2px}
-.pi-avv{color:var(--warn);font-size:13px;margin:12px 2px 0;line-height:1.5}
+.pi-body tr.grp th{position:static;background:none;border-bottom:none;color:var(--gold);padding-bottom:2px}
+.pi-avv{color:var(--warn);font-size:13px;margin:12px 0 0;line-height:1.5}
 /* Sul telefono spariscono due colonne, e nessuna delle due porta informazione
    che non sia altrove:
      - Gain: in tutti i piani ogni riga a gain 0 si chiama "stelle" e il resto e'
@@ -650,6 +654,7 @@ color:var(--gold-dark);letter-spacing:1.6px;padding-bottom:2px}
 .pi-body th,.pi-body td{padding:7px 5px}
 .pi-body td{font-size:12px}
 .pi-head,.pi-tot{padding-left:12px;padding-right:12px}
+.kpi .v{font-size:36px}
 }
 """
 
@@ -854,9 +859,11 @@ def render(cfg: dict, d: dict) -> str:
 
     a(f"<!doctype html><html lang='it'><head><meta charset='utf-8'>"
       f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-      f"<meta name='theme-color' content='#071535'>"
+      f"<meta name='theme-color' content='#070b15'>"
       f"<title>{esc(r.get('title'))}</title><style>{CSS}</style></head><body><div class='wrap'>")
     logo = _logo_uri(r.get("logo", ""))
+    a(f"<nav class='topnav'><a href='{esc(r.get('app_url','/deepsky/'))}'>‹ Deep Sky Planner</a>"
+      f"<span>Osservatorio remoto · Texas</span></nav>")
     a("<div class='mast'>"
       + (f"<img src='{logo}' alt='Sideris Art'>" if logo else "")
       + f"<div><div class='brand'>{esc(r.get('brand',''))}</div>"
@@ -967,10 +974,10 @@ def render(cfg: dict, d: dict) -> str:
     # ---------------- qualita' ----------------
     a("<h2>Qualità — guida e fuoco</h2><div class='due'>")
     a("<div class='card'><div class='leg'>RMS <b>mediano</b> di guida per notte (\")</div>"
-      + svg_series(nights, "rms", int(r.get("chart_nights", 60)), "#6f9ee8", "\"",
+      + svg_series(nights, "rms", int(r.get("chart_nights", 60)), "#8fa9cf", "\"",
                    hi=d["bad_thr"]) + "</div>")
     a("<div class='card'><div class='leg'>HFR migliore per notte</div>"
-      + svg_series(nights, "hfr", int(r.get("chart_nights", 60)), "#f2b134") + "</div>")
+      + svg_series(nights, "hfr", int(r.get("chart_nights", 60)), "#e3cf9a") + "</div>")
     a("</div><div class='card' style='margin-top:14px'>"
       "<div class='leg'>Distribuzione dell'RMS dei singoli frame: la coda rossa è "
       "il materiale candidato allo scarto. Qui i frame ci sono <b>tutti</b>, "

@@ -74,9 +74,12 @@ CONFIRM_TEXT = {"start": "🚀 Stai per avviare ASIAIR, confermi?",
                             "• un piano o un autorun in corso viene FERMATO\n"
                             "• mount in park, OF2 chiuso, cooler acceso "
                             "(attesa temperatura)\n"
-                            "• asciugatura, poi flat/dark dei filtri di stanotte "
-                            "e sync sul NAS\n"
-                            "• alla fine ti chiedo se spegnere tutto",
+                            "• flat/dark dei filtri di stanotte e sync sul NAS\n"
+                            "• alla fine ti chiedo se spegnere tutto\n\n"
+                            "⏳ Con asciugatura = attesa adattiva alla condensa "
+                            "(5-30 min) a pannello chiuso, poi i flat\n"
+                            "🚀 Parti subito = niente attesa: flat appena la "
+                            "camera è in temperatura",
                 "stopflat": "🛑 Interrompo l'attesa dei flat?\n"
                             "• niente flat né dark stanotte\n"
                             "• il rig resta com'è (pannello chiuso, cooler "
@@ -84,11 +87,25 @@ CONFIRM_TEXT = {"start": "🚀 Stai per avviare ASIAIR, confermi?",
                             "• continua il promemoria periodico di spegnere\n"
                             "• «No» = il countdown prosegue"}
 
+# Flat/Dark: l'asciugatura e' FACOLTATIVA (richiesta utente 2026-09-15). Il «Sì»
+# si sdoppia: con attesa adattiva (il flusso di sempre) o partenza immediata.
+# Le due risposte consumano la stessa conferma 'flatdark' (CONFIRM_ALIAS).
+CONFIRM_KB = {
+    "flatdark": [
+        [{"text": "⏳ Sì, con asciugatura", "callback_data": "c:flatdark"}],
+        [{"text": "🚀 Sì, parti subito", "callback_data": "c:flatdark_now"}],
+        [{"text": "❌ No", "callback_data": "c:no"}]],
+}
+CONFIRM_ALIAS = {"flatdark_now": "flatdark"}
+
 # rifiuti dello Stop Flat, per fase del flusso (2026-08-15): si annulla SOLO
 # l'attesa, un autorun flat/dark gia' partito non si tocca
 STOPFLAT_NO = {
     "running": "i FLAT sono già partiti: un autorun in corso non lo fermo.",
     "darks": "i DARK sono già partiti: un autorun in corso non lo fermo.",
+    "sync": "flat e dark sono già finiti: sto copiando i file sul NAS.",
+    "ask_sync": "flat e dark sono già finiti: aspetto la tua risposta sul "
+                "sync NAS incompleto.",
     "ask_shutdown": "flat e dark sono già finiti: sto aspettando la tua "
                     "risposta sullo spegnimento.",
     "done": "il flusso flat è già concluso.",
@@ -126,6 +143,9 @@ class SfroBot:
         # stop dell'ATTESA flat (2026-08-15): stessa meccanica, un file solo
         self.fc_req = Path(cfg.get("flat_cancel_request_file",
                                    "/var/lib/sfro-agent/flat_cancel.json"))
+        # risposta "continuo con altri 30'?" del sync dopo flat/dark (2026-10-08)
+        self.ss_rep = Path(cfg.get("flat_sync_reply_file",
+                                   "/var/lib/sfro-agent/sync_reply.json"))
         self.state_file = Path(cfg.get("state_file", ""))
         self.offset = 0
         self.op_lock = threading.Lock()   # una sola operazione mutante alla volta
@@ -229,7 +249,9 @@ class SfroBot:
                           if pend and pend[0] == "stopflat"
                           else "❌ Operazione annullata.", thread=th)
                 return
-            if pend is None or pend[0] != action or time.time() - pend[1] > 600:
+            # «Parti subito» e' una seconda risposta alla STESSA conferma flatdark
+            if pend is None or pend[0] != CONFIRM_ALIAS.get(action, action) \
+                    or time.time() - pend[1] > 600:
                 ack()
                 self.send("⌛ Conferma scaduta: rilancia /sfro.", thread=th)
                 return
@@ -240,6 +262,9 @@ class SfroBot:
                 self.spawn("Shutdown", self.do_shutdown, th)
             elif action == "flatdark":
                 self.spawn("Flat/Dark", self.do_flatdark, th)
+            elif action == "flatdark_now":
+                self.spawn("Flat/Dark",
+                           lambda t: self.do_flatdark(t, dry=False), th)
             elif action == "stopflat":
                 self.spawn("Stop Flat", self.do_stopflat, th)
         elif data.startswith("fs:"):
@@ -252,10 +277,32 @@ class SfroBot:
             else:
                 ack("Lascio acceso")
                 self.spawn("Flat/Dark", self.do_flat_keep, th)
+        elif data.startswith("rs:"):
+            # bottone Rsync non finito in 60'+30' (2026-10-08): altri 30'?
+            self.api("editMessageReplyMarkup", chat_id=self.chat_id, message_id=mid)
+            if data == "rs:more":
+                ack("Continuo la copia")
+                self.spawn("Rsync", lambda t: self.do_rsync(t, more=True), th)
+            else:
+                ack("Copia fermata")
+                self.send("⏹ Copia fermata: i file mancanti restano sull'ASIAIR "
+                          "e li recupera il prossimo Rsync.", thread=th)
+        elif data.startswith("ss:"):
+            # stessa domanda, ma posta dall'AGENTE nel sync dopo flat/dark: la
+            # risposta va nel file di reply, l'agente la legge al ciclo dopo
+            self.api("editMessageReplyMarkup", chat_id=self.chat_id, message_id=mid)
+            more = data == "ss:more"
+            ack("Continuo la copia" if more else "Copia fermata")
+            # thread semplice e non spawn(): la risposta non e' un'operazione
+            # mutante del bot e non deve aspettare un Rsync manuale in corso
+            threading.Thread(target=self._safe, daemon=True,
+                             args=("Sync", lambda t: self.do_sync_reply(t, more),
+                                   th)).start()
 
     def ask_confirm(self, action: str, th):
-        kb = [[{"text": "✅ Sì", "callback_data": f"c:{action}"},
-               {"text": "❌ No", "callback_data": "c:no"}]]
+        kb = CONFIRM_KB.get(action) or [
+            [{"text": "✅ Sì", "callback_data": f"c:{action}"},
+             {"text": "❌ No", "callback_data": "c:no"}]]
         mid = self.send(CONFIRM_TEXT[action], keyboard=kb, thread=th)
         if mid:
             self.pending[mid] = (action, time.time())
@@ -548,7 +595,7 @@ class SfroBot:
         except Exception as e:
             log.warning("risposta flat manuale: %s", e)
 
-    def do_flatdark(self, th):
+    def do_flatdark(self, th, dry=True):
         """Bottone Flat/Dark (richiesta utente 2026-08-01): chiude la sessione
         e avvia SUBITO flat e dark senza aspettare l'alba — serve quando il
         maltempo rende inutile attendere la riapertura del tetto.
@@ -564,7 +611,8 @@ class SfroBot:
             self.send("⛔ Flat/Dark: flusso flat DISABILITATO in config.", thread=th)
             return
         stage = self.flat_stage()
-        if stage in ("drying", "running", "darks", "ask_shutdown"):
+        if stage in ("drying", "running", "darks", "sync", "ask_sync",
+                     "ask_shutdown"):
             self.send(f"ℹ️ Flusso flat GIÀ in corso (fase «{stage}»): "
                       "non lo faccio ripartire.", thread=th)
             return
@@ -597,6 +645,7 @@ class SfroBot:
                 {"ts": datetime.now(self.tz).isoformat(),
                  "closed_ts": datetime.now(self.tz).isoformat(),
                  "source": "telegram", "ask_shutdown": True,
+                 "dry_wait": bool(dry),
                  "cause": "flat_manuale"}))
         except Exception as e:
             self.send(f"⛔ Flat/Dark annullati: non riesco a scrivere la "
@@ -657,10 +706,15 @@ class SfroBot:
         # i minuti veri li decide l'AGENTE quando prende in carico la richiesta
         # (attesa adattiva sulla condensa stimata, 2026-09-06): qui si annuncia
         # il valore standard, l'agente scrive poi il suo con il perche'
-        dry = int(self.ff.get("dry_wait_minutes", 30))
+        if dry:
+            dmin = int(self.ff.get("dry_wait_minutes", 30))
+            attesa = (f"⏳ Asciugatura ~{dmin} min a pannello chiuso (l'agente la "
+                      f"adatta alla condensa stimata)")
+        else:
+            attesa = ("🚀 Asciugatura SALTATA: flat appena la camera è in "
+                      "temperatura")
         self.send(f"✅ Richiesta presa in consegna dall'agente (entro 3 min).\n"
-                  f"⏳ Asciugatura ~{dry} min a pannello chiuso (l'agente la "
-                  f"adatta alla condensa stimata)"
+                  + attesa
                   + (f", fascia anticondensa al {hv}%" if okh else "")
                   + ", poi flat e dark dei filtri di stanotte e sync sul NAS.\n"
                   "A fine processo ti chiederò se spegnere tutto.", thread=th)
@@ -712,6 +766,29 @@ class SfroBot:
             time.sleep(2)
         return True
 
+    def do_sync_reply(self, th, more):
+        """Risposta alla domanda dell'agente sul sync dopo flat/dark non finito
+        in 60'+30' (2026-10-08). Come per lo spegnimento, il messaggio parte
+        PRIMA che il ciclo salvi state.json: si aspetta la fase giusta."""
+        t0 = time.time()
+        while self.flat_stage() != "ask_sync":
+            if time.time() - t0 > 40:
+                self.send("⌛ Richiesta non più valida: il sync dopo flat/dark "
+                          "non è in attesa di risposta.", thread=th)
+                return
+            time.sleep(2)
+        self.ss_rep.parent.mkdir(parents=True, exist_ok=True)
+        self.ss_rep.write_text(json.dumps(
+            {"answer": "more" if more else "stop",
+             "ts": datetime.now(self.tz).isoformat()}))
+        self.send(f"👍 Continuo: altri {self.sc_minutes('long_more_minutes', 30)}"
+                  "' di copia entro pochi minuti." if more else
+                  "👍 Copia fermata: il flusso flat si chiude a sync incompleto.",
+                  thread=th)
+
+    def sc_minutes(self, key, default):
+        return int((self.cfg.get("sync_module", {}) or {}).get(key, default))
+
     def do_flat_keep(self, th):
         """'No, lascia acceso' alla domanda di fine flat/dark."""
         if not self.wait_ask_stage(th):
@@ -733,12 +810,17 @@ class SfroBot:
                             "" if ok else "shutdown non completato")
 
     # ---------------- Rsync ----------------
-    def do_rsync(self, th):
+    def do_rsync(self, th, more=False):
         """Sync manuale ASIAIR->NAS (stessa sync_pass dell'agente: cartelle
         Light/Dark/Flat della share 'TF Images'). Operazione lunga: avviso a
         INIZIO e FINE con il conteggio dei file sincronizzati (2026-07-09).
         Dal 2026-07-26 i file arrivano sul NAS smistati per data (aaaammgg):
-        essendo la stessa sync_pass, il bottone si comporta come l'agente."""
+        essendo la stessa sync_pass, il bottone si comporta come l'agente.
+        SYNC LUNGHI (richiesta utente 2026-10-08, 12 GB di flat+dark a ~2 MB/s
+        = 4 pressioni del bottone, ognuna chiusa da un falso "⛔ in errore"):
+        prima passata 60', se non basta una seconda da 30' in automatico, poi
+        si CHIEDE se continuare con altri 30' (more=True = quella passata).
+        Ogni 9' un messaggio coi file copiati finora."""
         sc = self.cfg.get("sync_module", {}) or {}
         if not sc.get("enabled"):
             self.send("⛔ Rsync: modulo sync disabilitato in config.", thread=th)
@@ -749,16 +831,69 @@ class SfroBot:
                       + ("(VPN giù)." if d["vpn_up"] is False
                          else "(spento o in avvio)."), thread=th)
             return
-        self.send("💾 Rsync ASIAIR→NAS avviato (Light/Dark/Flat, smistati "
-                  "per data) — può richiedere alcuni minuti…", thread=th)
-        r = A.sync_pass(sc, dry_run=False)
-        if r.get("error"):
-            self.send(f"⛔ Rsync in errore: {r['error']}", thread=th)
+        # un solo sync alla volta fra bot e agente (lock in sync_pass)
+        chi = A.sync_busy(sc)
+        if chi:
+            self.send(f"⏳ Rsync non avviato: è già in corso il {chi}. "
+                      "Riprova quando ha finito.", thread=th)
             return
-        bk = r.get("by_kind") or {}
-        det = " · ".join(f"{k} {bk.get(k, 0)}" for k in ("light", "flat", "dark"))
-        self.send(f"✅ Rsync completato: {r.get('files', 0)} elementi "
-                  f"sincronizzati ({det}).", thread=th)
+        first = self.sc_minutes("long_first_minutes", 60)
+        extra = self.sc_minutes("long_more_minutes", 30)
+        caps = [extra] if more else [first, extra]
+        tot = 0
+        for i, cap in enumerate(caps):
+            if i == 0:
+                self.send("💾 Rsync ASIAIR→NAS avviato (Light/Dark/Flat, "
+                          "smistati per data, tutte le date"
+                          + (f", altri {cap} minuti" if more
+                             else f", al massimo {cap} minuti")
+                          + ") — ogni 9' ti aggiorno sui file copiati…",
+                          thread=th)
+
+            def _avanza(rr, sec, base=tot, n=i):
+                self.send(A.sync_progress_text(
+                    base + rr["copied"], rr["bytes"], sec,
+                    "" if len(caps) == 1 else f"passata {n + 1}"), thread=th)
+            # full=True: il bottone ignora la finestra di date recenti delle
+            # passate automatiche (2026-10-08) e ricopia tutto cio' che manca
+            # sul NAS. E' il recupero manuale dopo un fermo del NAS piu' lungo
+            # della finestra.
+            r = A.sync_pass(sc, dry_run=False, cfg=self.cfg, full=True,
+                            cap_minutes=cap, progress=_avanza)
+            tot += int(r.get("copied") or 0)
+            if r.get("busy"):
+                self.send(f"⏳ Rsync interrotto prima della passata {i + 1}: "
+                          f"è partito il {r['busy']}, che copia anche il resto "
+                          f"({tot} file copiati finora da qui).", thread=th)
+                return
+            if r.get("cap") and i + 1 < len(caps):
+                self.send(f"⏳ {cap} minuti non bastano ({tot} file copiati: "
+                          "copia lunga, non un guasto). Seconda passata di "
+                          f"{caps[i + 1]} minuti, i file già copiati si "
+                          "saltano…", thread=th)
+                continue
+            if r.get("cap"):
+                self.send(f"⚠️ Rsync non ancora finito ({tot} file copiati in "
+                          "questa sessione): gli altri sono ancora solo "
+                          f"sull'ASIAIR.\nContinuo con altri {extra} minuti?",
+                          keyboard=[[{"text": f"✅ Sì, altri {extra}'",
+                                      "callback_data": "rs:more"},
+                                     {"text": "⏹ No, basta così",
+                                      "callback_data": "rs:stop"}]],
+                          thread=th)
+                return
+            if r.get("error"):
+                self.send(f"⛔ Rsync in errore: {r['error']}", thread=th)
+                return
+            bk = r.get("by_kind") or {}
+            det = " · ".join(f"{k} {bk.get(k, 0)}" for k in ("light", "flat", "dark"))
+            msg = (f"✅ Rsync completato: {tot} file copiati"
+                   + (f" in {i + 1} passate" if i else "")
+                   + f" (ultima passata: {det}).")
+            # vista per soggetto x notte aggiornata dallo stesso sync (2026-09-17)
+            sess = A.SG.riepilogo(r["sess"]) if A.SG and r.get("sess") else ""
+            self.send(msg + ("\n" + sess if sess else ""), thread=th)
+            return
 
     # ---------------- Shutdown ----------------
     def do_shutdown(self, th):

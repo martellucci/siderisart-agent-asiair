@@ -16,7 +16,8 @@ import sfro_agent as A
 
 A.time.sleep = lambda s: None
 A.ping = lambda host: True
-A.sync_pass = lambda sc, dry: {"files": 0}
+A.sync_busy = lambda sc: None    # mai il lock di produzione nei test
+A.sync_pass = lambda sc, dry, cfg=None, **kw: {"files": 0}
 A.load_kv_file = lambda p: {}
 
 MSGS = []

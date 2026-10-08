@@ -18,7 +18,8 @@ NAS = TMP / "nas"              # finto nas_dest
 SC = {"asiair_ip": "1.2.3.4", "smb_share_name": "TF Images",
       "mount_point": str(SRC), "credentials_file": "/dev/null",
       "nas_dest": str(NAS), "rsync_exclude": ["*.jpg"], "rsync_extra": [],
-      "per_run_cap_minutes": 30}
+      "per_run_cap_minutes": 30,
+      "lock_file": str(NAS / "sync.lock")}    # mai il lock di produzione
 DEST = NAS / "asiair_sfro" / "ASIAIR"
 TARGET = "Dark Scorpion Nebula"   # con spazi: caso reale
 
