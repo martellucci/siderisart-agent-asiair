@@ -87,11 +87,14 @@ evenings.
 - **Dark flats** immediately after, panel off, at exactly the exposure computed
   from the flats it just took. The cooler stays on until the last dark; only
   then does the rig rest (cooler and heaters off) while the files are copied.
-- **Final sync in passes**: 60 minutes, then automatically another 30, with a
-  Telegram message every 9 minutes counting the files copied so far. If it still
-  isn't done it **asks** whether to go on for another 30 minutes: on a slow link
-  a long copy is not an error, and the rig is **never powered down with an
-  incomplete sync** unless you say so.
+- **Final sync, one pass**: up to 100 minutes, never restarted on its own. A
+  dry run first counts exactly what is missing, then a single **live Telegram
+  message** is edited in place every 9 minutes (silently) with a progress bar,
+  files and GB against the total, speed and estimated finish — it even warns
+  when the estimate runs past the time limit. The end arrives as a new message.
+  If the time runs out the rig **stays on** and is **never powered down with an
+  incomplete sync**: you press Rsync again and the copy picks up where it left
+  off.
 - `pi_shutdown`, waits until the box is **actually** dead, and only then cuts
   power at the smart plugs.
 
@@ -99,7 +102,8 @@ evenings.
 
 - **Telegram bot** with a button menu: status, power-on, start plan, manual sync,
   on-demand flats/darks, shutdown — every dangerous action behind a confirmation.
-  The manual sync uses the same 60 + 30 minute passes and progress messages.
+  The manual sync follows **exactly the same procedure**: one pass, the same
+  live message, the same texts.
 - **One sync at a time**: the bot and the agent share a lock (`flock`), so two
   copies never fight over the same mount. Whoever arrives second doesn't start —
   the night pass skips silently, the post-flat sync waits, the button says
@@ -318,12 +322,13 @@ evening.
 | **Firmware floats** | You write an exposure of `8.19` s, read back `8.190001`, and an exact comparison fails. | Exposures rounded to one decimal, compared with a 5 ms tolerance. |
 | **A powered-off ASIAIR is a zombie socket** | The box sends no FIN/RST when it dies: the guiding connection stays open forever and telemetry dies **silently**. | TCP keepalive plus a forced reconnect if the socket goes quiet beyond N seconds. |
 | **`rsync` rc=24** | "File vanished": a FITS still being written on the ASIAIR. Treating it as fatal aborted the entire shutdown. | Tolerated as a warning: the file is picked up on the next sync. |
-| **A slow link looks like a hang** | At ~2 MB/s from the remote site, 12 GB of flats and darks need well over an hour. Each 30-minute pass hit its time cap, the bot reported "error" and stopped, and with no output in between it looked frozen — the server got rebooted for nothing. | Long passes (60 + 30 minutes, then a question), rsync output streamed live, and a progress message every 9 minutes with the file count. |
+| **A slow link looks like a hang** | At ~2 MB/s from the remote site, 12 GB of flats and darks need well over an hour. Each 30-minute pass hit its time cap, the bot reported "error" and stopped, and with no output in between it looked frozen — the server got rebooted for nothing. | Long passes, rsync output streamed live, and a progress message with the file count. Today: one 100-minute pass and a live message with percentage and estimated finish. |
 | **Cleaning the mirror re-downloads everything** | rsync makes the destination match the source: delete old flats on the NAS but not on the ASIAIR, and the next passes copy them all back — five hours of old flats queued **ahead of** the night's lights. | Clean the ASIAIR first, then the NAS. Automatic passes only look at the last few days anyway (`recent_days`); the manual sync button doesn't, by design. |
 | **Two syncs on the same mount** | The bot's manual sync and the agent's periodic pass can run at once: each mounts and unmounts the share, pulling it out from under the other. | A non-blocking `flock`: one sync at a time, released by the kernel if the holder dies. |
 | **AUTO flat exposure hits the ceiling** | At gain 0 with the panel at 50%, the computed exposure clamps at 15 s and sometimes the calculation **fails outright**: the autorun never starts. | Per-gain panel brightness, so the exposure lands in the middle of the usable window. |
 | **The ASIAIR piles everything together** | Every night's frames land in the same folder per type, and it isn't configurable in the app. | Sorting by date is done by the sync **at the destination**, reading the date from the filename. |
 | **systemd timeout on oneshot units** | It is **disabled** by default: one cycle hung on a dead CIFS mount blocks the timer **forever**. | An explicit `TimeoutStartSec` in the unit. |
+| **A timeout shorter than the work** | The sync pass grew to 60 minutes, but the unit still said `TimeoutStartSec=45min`. systemd killed the cycle twice mid-copy; SIGTERM ends Python **without** running `finally`, so the state was lost and every next cycle re-announced "darks done", switched off the cooler again and restarted the sync from zero — the chat filled up with overlapping messages counting from zero. | The timeout must exceed the longest pass (now 2 h for 100 minutes). State saved **before** the copy starts, SIGTERM turned into a clean exit, and a pass found already started is **never** restarted. |
 
 ---
 

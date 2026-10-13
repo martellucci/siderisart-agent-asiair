@@ -177,15 +177,20 @@ assert r["skipped_dates"] == 0 and len(passate_per_data()) == 8, r
 print("recent_days=0: nessuna finestra, comportamento storico")
 
 # TETTO SU MISURA + AVANZAMENTO (2026-10-08): cap_minutes sostituisce
-# per_run_cap_minutes (bottone Rsync e sync dopo flat/dark: 60' poi 30') e
+# per_run_cap_minutes (bottone Rsync e sync dopo flat/dark) e
 # progress viene chiamata a cadenza coi file completati finora.
 import time                                                     # noqa: E402
 A.split_by_date = lambda src: ({recente}, False)
 SEEN = {}
 
 
+STREAMS = []
+
+
 def _slow_stream(cmd, timeout, on_line):
-    SEEN["timeout"] = max(SEEN.get("timeout", 0), timeout)
+    STREAMS.append(cmd)
+    if "--dry-run" not in cmd:
+        SEEN["timeout"] = max(SEEN.get("timeout", 0), timeout)
     for ln in FAKE_OUT.splitlines():
         on_line(ln)
         time.sleep(0.05)
@@ -195,9 +200,20 @@ def _slow_stream(cmd, timeout, on_line):
 A._run_stream = _slow_stream
 TICKS = []
 r = A.sync_pass(dict(sc, progress_minutes=0.004), dry_run=False, cap_minutes=60,
-                progress=lambda rr, sec: TICKS.append((rr["copied"], sec)))
+                progress=lambda rr, sec: TICKS.append(
+                    (rr["copied"], sec, rr.get("total_files"), rr.get("total_bytes"))))
 assert r["ok"] and SEEN["timeout"] > 30 * 60, SEEN      # tetto 60', non 30'
 assert TICKS and all(t[0] <= r["copied"] for t in TICKS), TICKS
+# CONTEGGIO INIZIALE (messaggio «vivo», 2026-10-13): le stesse passate in
+# --dry-run PRIMA della copia; i totali coincidono con quanto poi copiato e il
+# primo avanzamento parte subito, a 0 file, gia' coi totali
+dry = [c for c in STREAMS if "--dry-run" in c]
+real = [c for c in STREAMS if "--dry-run" not in c]
+assert len(dry) == len(real) and STREAMS.index(real[0]) > STREAMS.index(dry[-1]), STREAMS
+assert [c[:-1] for c in real] == [[x for x in c if x != "--dry-run"][:-1] for c in dry]
+assert (r["total_files"], r["total_bytes"]) == (r["copied"], r["bytes"]), r
+assert TICKS[0][0] == 0 and TICKS[0][2:] == (r["copied"], r["bytes"]), TICKS
+print(f"conteggio iniziale: {r['total_files']} file, {r['total_bytes']} byte = copiati")
 assert [t[0] for t in TICKS] == sorted(t[0] for t in TICKS), TICKS
 n_ticks = len(TICKS)
 time.sleep(0.5)
@@ -208,10 +224,76 @@ TICKS.clear()
 A.sync_pass(dict(sc, progress_minutes=0.004), dry_run=True,
             progress=lambda rr, sec: TICKS.append(1))
 assert not TICKS, TICKS
-txt = A.sync_progress_text(47, 2_400_000_000, 1200, "passata 1")
-assert txt == ("⏳ Rsync in corso — passata 1: 47 file copiati finora · "
-               "questa passata 2,4 GB in 20' (2,0 MB/s)."), txt
+# senza avanzamento (passate notturne) nessun conteggio iniziale: costo invariato
+STREAMS.clear()
+A.sync_pass(sc, dry_run=False)
+assert STREAMS and not any("--dry-run" in c for c in STREAMS), STREAMS
+
+# MESSAGGIO «VIVO» (formato scelto dall'utente il 2026-10-13)
+from datetime import datetime                                    # noqa: E402
+T0 = datetime(2026, 10, 13, 13, 9, tzinfo=A.TZ_IT)
+NOW = datetime(2026, 10, 13, 14, 1, tzinfo=A.TZ_IT)
+R = {"copied": 86, "bytes": 4_100_000_000,
+     "total_files": 180, "total_bytes": 8_800_000_000}
+txt = A.sync_live_text("Sync NAS flat/dark", "in corso", R, 52 * 60, T0, NOW, 120)
+assert txt == ("💾 Sync NAS flat/dark — in corso\n"
+               "▓▓▓▓▓░░░░░ 47%\n"
+               "86/180 file · 4,1/8,8 GB\n"
+               "dalle 13:09 (52') · 1,3 MB/s · fine stimata ~15:00\n"
+               "agg. 14:01"), txt
 print(txt)
+# stima oltre il tempo massimo: lo dice
+txt = A.sync_live_text("X", "in corso", dict(R, bytes=1_000_000_000), 52 * 60,
+                       T0, NOW, 100)
+assert "(oltre il limite delle 14:49)" in txt, txt
+# conteggio iniziale non riuscito: niente barra ne' stima
+txt = A.sync_live_text("X", "in corso", {"copied": 3, "bytes": 600_000_000,
+                                         "total_files": None,
+                                         "total_bytes": None}, 300, T0, NOW, 100)
+assert "%" not in txt and "fine stimata" not in txt and "3 file · 600 MB copiati" in txt, txt
+# niente da copiare
+txt = A.sync_live_text("X", "completato ✅", {"copied": 0, "bytes": 0,
+                                             "total_files": 0, "total_bytes": 0},
+                       20, T0, NOW, 100)
+assert "niente da copiare" in txt and 'dalle 13:09 (20")' in txt, txt
+# stato finale: nessuna stima
+txt = A.sync_live_text("X", "completato ✅", dict(R, copied=180,
+                                                 bytes=8_800_000_000),
+                       106 * 60, T0, NOW, 100)
+assert "▓▓▓▓▓▓▓▓▓▓ 100%" in txt and "1 h 46'" in txt and "stimata" not in txt, txt
+# fine e tempo esaurito coi totali
+assert A.sync_done_text("Sync NAS flat/dark", {
+    "copied": 180, "bytes": 8_800_000_000, "elapsed_s": 106 * 60,
+    "by_kind": {"light": 0, "flat": 90, "dark": 90}}) == (
+    "✅ Sync NAS flat/dark completato: 180 file · 8,8 GB in 1 h 46' "
+    "(1,4 MB/s) — light 0 · flat 90 · dark 90.")
+assert "(150/180 file · 7,3/8,8 GB copiati" in A.sync_cap_text(
+    "X", {"long_sync_minutes": 100}, {"copied": 150, "bytes": 7_300_000_000,
+                                      "total_files": 180,
+                                      "total_bytes": 8_800_000_000})
+
+# SyncLive: avvio inviato, avanzamenti MODIFICATI al suo posto, avanzamento
+# tardivo dopo la chiusura scartato, ripiego su messaggio nuovo se la modifica
+# non riesce
+SENT, EDITS = [], []
+EDIT_OK = [True]
+live = A.SyncLive("X", {"long_sync_minutes": 100, "progress_minutes": 9},
+                  lambda t: (SENT.append(t), len(SENT))[1],
+                  lambda mid, t: (EDITS.append((mid, t)), EDIT_OK[0])[1])
+assert len(SENT) == 1 and "conto i file da copiare" in SENT[0], SENT
+live.tick(R, 600)
+assert len(SENT) == 1 and EDITS[-1][0] == 1 and "47%" in EDITS[-1][1], EDITS
+EDIT_OK[0] = False
+live.tick(R, 1200)
+assert len(SENT) == 2 and "47%" in SENT[-1], SENT        # ripiego: nuovo messaggio
+EDIT_OK[0] = True
+live.tick(R, 1800)
+assert EDITS[-1][0] == 2, EDITS                         # ora si modifica il nuovo
+live.close(dict(R, elapsed_s=2000), "NON completato")
+n = len(EDITS)
+live.tick(R, 2400)
+assert len(EDITS) == n and "NON completato" in EDITS[-1][1], EDITS
+print("SyncLive: avvio, modifiche al posto, ripiego e chiusura: OK")
 
 # BLOCCO DEL SYNC (2026-10-08): con un altro sync in corso (lock tenuto, qui
 # da un secondo open del file: flock e' per descrittore) sync_pass non monta

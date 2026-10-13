@@ -220,10 +220,9 @@ flat_flow:
   # questo tempo l'agente non spegne nulla e lascia il rig acceso.
   manual_ask_timeout_minutes: 60
   flat_max_minutes: 90          # watchdog: autorun flat oltre questo tempo -> errore
-  # Sync finale a PASSATE (2026-09-15; tempi rivisti il 2026-10-08): tetti in
-  # sync_module.long_first_minutes / long_more_minutes. Se non basta si CHIEDE
-  # se continuare (bottoni Telegram); senza risposta entro
-  # manual_ask_timeout_minutes -> errore, NON si spegne, rig lasciato acceso.
+  # Sync finale: UNA passata da sync_module.long_sync_minutes (2026-10-13; prima
+  # passate 60'+30' con domanda "continuo?"). Se non basta: NON si spegne, rig
+  # lasciato acceso, il resto si rilancia da Telegram.
   shutdown_wait_seconds: 15     # attesa fissa dopo pi_shutdown prima dei ping
   shutdown_ping_timeout_seconds: 120  # KASA giu' solo quando l'ASIAIR non pinga piu'
   # Talvolta il Pi continua a rispondere al PING mentre l'app e' gia' spenta e
@@ -342,13 +341,16 @@ sync_module:
   rsync_exclude: ["*.jpg"]
   rsync_extra: []
   per_run_cap_minutes: 30             # passate NOTTURNE/teardown (invariato)
-  # SYNC LUNGHI (richiesta utente 2026-10-08: 12 GB di flat+dark LRGB a ~2 MB/s
-  # hanno chiesto 4 pressioni del bottone Rsync, ognuna chiusa da un "⛔ in
-  # errore"). Bottone Rsync e sync dopo flat/dark: prima passata 60', se non
-  # basta una seconda da 30' in automatico, poi si CHIEDE se fare altri 30'.
-  # Durante questi sync, ogni progress_minutes un messaggio coi file copiati.
-  long_first_minutes: 60
-  long_more_minutes: 30
+  # SYNC LUNGHI = bottone Rsync del bot e sync dopo flat/dark. STESSA procedura
+  # per entrambi (richiesta utente 2026-10-13): UNA passata da long_sync_minutes,
+  # avanzamento ogni progress_minutes, MAI ripartita in automatico e nessuna
+  # domanda. Se non basta: messaggio "NON completato", il resto si rilancia a
+  # mano da Telegram (Rsync). Nel flusso flat in piu' NON si spegne (rig acceso).
+  # Storia: dal 2026-10-08 erano 60' + 30' automatici + domanda "continuo?";
+  # il 13/10 la passata da 60' in un servizio da 45' (TimeoutStartSec) e' stata
+  # uccisa due volte e il flusso ha ripetuto dark/cooler/fascia/sync da zero.
+  # Deve restare DENTRO TimeoutStartSec di sfro-agent.service (2h).
+  long_sync_minutes: 100
   progress_minutes: 9
   # Un solo sync alla volta fra bot e agente (2026-10-08): flock su questo file.
   # Chi arriva secondo non parte: la passata notturna salta in silenzio, il

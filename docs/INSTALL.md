@@ -91,7 +91,10 @@ don't enable them.
 > `Type=oneshot` services systemd disables the timeout *by default*: a hung cycle
 > — on a dead CIFS mount in D-state, for instance — would block the timer
 > **forever**, and the agent would silently stop running with nobody noticing.
-> The value is sized for the worst case (final sync plus teardown).
+> The value is sized for the worst case (final sync plus teardown) and **must
+> exceed the longest sync pass** (`sync_module.long_sync_minutes`, 100 minutes
+> → `TimeoutStartSec=2h`): a timeout shorter than the pass kills the copy
+> halfway, every time.
 
 ## 5. Dashboard (optional)
 

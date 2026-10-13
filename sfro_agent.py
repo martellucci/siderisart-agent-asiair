@@ -78,13 +78,13 @@ log = logging.getLogger("sfro-agent")
 # successiva) la logica normale del ciclo NON deve girare: riaccenderebbe la
 # KASA appena spenta o riavvierebbe il piano. 'ask_shutdown' = flusso manuale
 # in attesa della risposta sullo spegnimento (2026-08-01).
-# 'cancelled' (stop dell'attesa dal menu, 2026-08-15) e 'error' NON sono qui di
-# proposito: il flusso e' finito e il promemoria "spegni tu" deve tornare a
-# uscire; restano pero' valori PIENI, cosi' i rami che all'alba rifarebbero
-# teardown+flat (pretendono "nessuna fase flat") non ripartono da soli.
-# 'ask_sync' = sync dopo flat/dark non finito in 60'+30', si chiede se
-# continuare (2026-10-08).
-FLAT_STAGES_BUSY = ("drying", "running", "darks", "sync", "ask_sync",
+# 'cancelled' (stop dell'attesa dal menu, 2026-08-15), 'error' e
+# 'sync_incomplete' (sync dopo flat/dark non finito nella sua unica passata,
+# 2026-10-13) NON sono qui di proposito: il flusso e' finito e il promemoria
+# "spegni tu" deve tornare a uscire; restano pero' valori PIENI, cosi' i rami
+# che all'alba rifarebbero teardown+flat (pretendono "nessuna fase flat") non
+# ripartono da soli.
+FLAT_STAGES_BUSY = ("drying", "running", "darks", "sync",
                     "ask_shutdown", "done")
 
 
@@ -483,13 +483,15 @@ class Telegram:
         self.enabled = enabled and bool(self.token) and bool(self.chat_id)
         self.timeout = timeout
 
-    def send(self, text: str, keyboard=None) -> None:
+    def send(self, text: str, keyboard=None):
         """Messaggio in chat. Con `keyboard` (lista di righe di bottoni inline)
         il messaggio porta i bottoni: le callback le riceve il bot persistente
-        sfro_telegram.py (l'agente e' un oneshot e non fa polling)."""
+        sfro_telegram.py (l'agente e' un oneshot e non fa polling).
+        Ritorna il message_id (None se non inviato): serve al messaggio «vivo»
+        del sync (SyncLive, 2026-10-13)."""
         if not self.enabled:
             log.info("[telegram disabilitato] %s", text)
-            return
+            return None
         payload = {"chat_id": self.chat_id, "text": text}
         if self.thread_id:
             payload["message_thread_id"] = self.thread_id
@@ -501,8 +503,29 @@ class Telegram:
                 json=payload, timeout=self.timeout)
             if r.status_code != 200:
                 log.warning("Telegram HTTP %s: %s", r.status_code, r.text[:200])
+                return None
+            return (r.json().get("result") or {}).get("message_id")
         except Exception as e:
             log.warning("Invio Telegram fallito: %s", e)
+            return None
+
+    def edit(self, message_id, text: str) -> bool:
+        """Riscrive un messaggio gia' inviato (nessuna notifica sul telefono).
+        False se non riesce: chi chiama ripiega su un messaggio nuovo."""
+        if not self.enabled or not message_id:
+            return False
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{self.token}/editMessageText",
+                json={"chat_id": self.chat_id, "message_id": message_id,
+                      "text": text}, timeout=self.timeout)
+            if r.status_code != 200:
+                log.warning("Telegram edit HTTP %s: %s", r.status_code, r.text[:200])
+                return False
+            return True
+        except Exception as e:
+            log.warning("Modifica Telegram fallita: %s", e)
+            return False
 
 
 # --------------------------------------------------------------------------- #
@@ -1815,19 +1838,136 @@ def _run_stream(cmd, timeout, on_line):
                                            errf.read())
 
 
-def sync_progress_text(files: int, nbytes: int, elapsed_s: float,
-                       label: str = "") -> str:
-    """Messaggio di avanzamento di un sync lungo (ogni 9', 2026-10-08)."""
-    mb = nbytes / 1e6
-    rate = mb / elapsed_s if elapsed_s > 0 else 0.0
-    vol = f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB"
-    vel = f"{rate:.1f} MB/s"
-    # file: totale della sessione (anche passate precedenti); volume e velocita'
-    # sono della passata in corso
-    return (f"⏳ Rsync in corso{(' — ' + label) if label else ''}: "
-            f"{files} file copiati finora · questa passata "
-            f"{vol.replace('.', ',')} in {int(elapsed_s // 60)}' "
-            f"({vel.replace('.', ',')}).")
+# --------------------------------------------------------------------------- #
+# SYNC LUNGHI: testi e messaggio «vivo», comuni al bottone Rsync del bot e al
+# sync dopo flat/dark (richiesta utente 2026-10-13: "la procedura deve essere
+# sempre la medesima"). `cosa` dice quale dei due e' ("Rsync ASIAIR→NAS",
+# "Sync NAS flat/dark"); il resto del messaggio e' identico.
+# Formato dell'avanzamento scelto dall'utente il 13/10:
+#   💾 Sync NAS flat/dark — in corso
+#   ▓▓▓▓▓░░░░░ 47%
+#   86/180 file · 4,1/8,8 GB
+#   dalle 13:09 (52') · 1,3 MB/s · fine stimata ~14:50
+#   agg. 14:01
+# --------------------------------------------------------------------------- #
+TZ_IT = ZoneInfo("Europe/Rome")
+
+
+def _num(x: float, d: int = 1) -> str:
+    return f"{x:.{d}f}".replace(".", ",")
+
+
+def _vol(done: float, tot: float = None) -> str:
+    """"4,1 GB" oppure "4,1/8,8 GB": unita' scelta sul totale (MB sotto 1 GB)."""
+    ref = tot if tot is not None else done
+    if ref >= 1e9:
+        return (f"{_num(done / 1e9)}/{_num(tot / 1e9)} GB" if tot is not None
+                else f"{_num(done / 1e9)} GB")
+    return (f"{done / 1e6:.0f}/{tot / 1e6:.0f} MB" if tot is not None
+            else f"{done / 1e6:.0f} MB")
+
+
+def _dur(sec: float) -> str:
+    if sec < 60:
+        return f'{int(sec)}"'
+    m = int(sec // 60)
+    return f"{m}'" if m < 60 else f"{m // 60} h {m % 60:02d}'"
+
+
+def sync_live_text(cosa: str, stato: str, r: dict, elapsed_s: float,
+                   t0: datetime, now: datetime, cap_min: int) -> str:
+    """Testo del messaggio «vivo». r = risultato (anche parziale) di
+    sync_pass: copied/bytes finora, total_files/total_bytes dal conteggio
+    iniziale (None se non riuscito: niente barra ne' stima)."""
+    righe = [f"💾 {cosa} — {stato}"]
+    tf, tb = r.get("total_files"), r.get("total_bytes")
+    cf, cb = int(r.get("copied") or 0), int(r.get("bytes") or 0)
+    if tf is None:
+        righe.append(f"{cf} file · {_vol(cb)} copiati")
+    elif tf == 0:
+        righe.append("niente da copiare: il NAS è già allineato")
+    else:
+        pct = (100 * cb / tb) if tb else (100 * cf / tf)
+        pct = max(0, min(100, int(round(pct))))
+        n = int(round(pct / 10))
+        righe += [f"{'▓' * n}{'░' * (10 - n)} {pct}%",
+                  f"{cf}/{tf} file · {_vol(cb, tb)}"]
+    riga = f"dalle {t0:%H:%M} ({_dur(elapsed_s)})"
+    if cb > 0 and elapsed_s >= 60:     # velocita' e stima solo dopo 1 minuto
+        riga += f" · {_num(cb / elapsed_s / 1e6)} MB/s"
+        if stato == "in corso" and tb and tb > cb:
+            eta = now + timedelta(seconds=(tb - cb) / (cb / elapsed_s))
+            riga += f" · fine stimata ~{eta:%H:%M}"
+            limite = t0 + timedelta(minutes=cap_min)
+            if eta > limite:
+                riga += f" (oltre il limite delle {limite:%H:%M})"
+    righe += [riga, f"agg. {now:%H:%M}"]
+    return "\n".join(righe)
+
+
+class SyncLive:
+    """Messaggio «vivo» di un sync lungo (2026-10-13): inviato all'avvio e poi
+    MODIFICATO al suo posto a ogni avanzamento (le modifiche non suonano sul
+    telefono). La fine la annuncia chi chiama con un messaggio NUOVO, che
+    invece suona. Se la modifica non riesce si ripiega su un messaggio nuovo,
+    che diventa quello da modificare. send(testo) -> message_id | None,
+    edit(message_id, testo) -> bool."""
+
+    def __init__(self, cosa: str, sc: dict, send, edit):
+        self.cosa, self.send, self.edit = cosa, send, edit
+        self.cap = int(sc.get("long_sync_minutes", 100))
+        every = float(sc.get("progress_minutes", 9))
+        self.t0 = datetime.now(TZ_IT)
+        self.closed = False
+        self.lock = threading.Lock()
+        self.mid = send(f"💾 {cosa} — in corso\nconto i file da copiare…\n"
+                        f"al massimo {self.cap} minuti · aggiornamento qui "
+                        f"ogni {every:g}'")
+
+    def _show(self, text: str, final: bool = False) -> None:
+        with self.lock:
+            if self.closed and not final:
+                return              # avanzamento arrivato dopo la chiusura
+            if self.mid and self.edit(self.mid, text):
+                return
+            mid = self.send(text)
+            if mid:
+                self.mid = mid
+
+    def tick(self, r: dict, elapsed_s: float) -> None:
+        """Callback `progress` di sync_pass."""
+        self._show(sync_live_text(self.cosa, "in corso", r, elapsed_s, self.t0,
+                                  datetime.now(TZ_IT), self.cap))
+
+    def close(self, r: dict, stato: str) -> None:
+        """Stato finale nel messaggio vivo (completato / NON completato / ...)."""
+        self.closed = True
+        now = datetime.now(TZ_IT)
+        el = r.get("elapsed_s")
+        el = (now - self.t0).total_seconds() if el is None else el
+        self._show(sync_live_text(self.cosa, stato, r, el, self.t0, now,
+                                  self.cap), final=True)
+
+
+def sync_done_text(cosa: str, r: dict) -> str:
+    bk = r.get("by_kind") or {}
+    det = " · ".join(f"{k} {bk.get(k, 0)}" for k in ("light", "flat", "dark"))
+    cb, el = int(r.get("bytes") or 0), float(r.get("elapsed_s") or 0)
+    vel = f" ({_num(cb / el / 1e6)} MB/s)" if cb and el >= 60 else ""
+    return (f"✅ {cosa} completato: {int(r.get('copied') or 0)} file · "
+            f"{_vol(cb)} in {_dur(el)}{vel}" + (f" — {det}" if bk else "") + ".")
+
+
+def sync_cap_text(cosa: str, sc: dict, r: dict) -> str:
+    cf, tf = int(r.get("copied") or 0), r.get("total_files")
+    cb, tb = int(r.get("bytes") or 0), r.get("total_bytes")
+    quanto = (f"{cf}/{tf} file · {_vol(cb, tb)}" if tf and tb is not None
+              else f"{cf} file")
+    return (f"⚠️ {cosa} NON completato in "
+            f"{int(sc.get('long_sync_minutes', 100))} minuti "
+            f"({quanto} copiati: copia lunga, non un "
+            "guasto). I file mancanti sono ancora solo sull'ASIAIR: non riparto "
+            "da solo, rilancia da /sfro → Rsync (i file già copiati si saltano).")
 
 
 def ping(host: str) -> bool:
@@ -2035,6 +2175,41 @@ def sync_pass(sc: dict, dry_run: bool, cfg: dict = None, full: bool = False,
         lk.close()
 
 
+def _prescan(passes, base, tail, t_end) -> tuple:
+    """Conteggio di cio' che le passate copieranno: (file, byte) dalle righe
+    "%i %l %n" di rsync --dry-run, con gli STESSI filtri della copia vera.
+    (None, None) se non si chiude entro t_end (monotonic) o se rsync fallisce:
+    il sync parte comunque, solo senza totali."""
+    nf = nb = 0
+
+    def on_line(ln):
+        nonlocal nf, nb
+        if len(ln) > 1 and ln[0] in "<>" and ln[1] == "f":
+            nf += 1
+            try:
+                nb += int(ln.split(" ", 2)[1])
+            except (IndexError, ValueError):
+                pass
+    for filters, src, dst, _kind in passes:
+        left = t_end - time.monotonic()
+        if left < 5:
+            log.warning("conteggio pre-sync oltre il tempo: copio senza totali")
+            return None, None
+        Path(dst).mkdir(parents=True, exist_ok=True)
+        try:
+            out = _run_stream(base + filters + tail +
+                              ["--dry-run", "--out-format=%i %l %n%L",
+                               f"{src}/", f"{dst}/"], left, on_line)
+        except subprocess.TimeoutExpired:
+            log.warning("conteggio pre-sync oltre il tempo: copio senza totali")
+            return None, None
+        if out.returncode not in (0, 24):
+            log.warning("conteggio pre-sync fallito (rsync rc=%s): copio senza "
+                        "totali", out.returncode)
+            return None, None
+    return nf, nb
+
+
 def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
                       full: bool = False, cap_minutes: float = None,
                       progress=None) -> dict:
@@ -2042,12 +2217,13 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
     # (2026-09-17): senza, il sync si comporta esattamente come prima.
     # full=True ignora la finestra di date recenti (2026-10-08): lo usa solo il
     # bottone Rsync del bot, per recuperare a mano tutto lo storico.
-    # SYNC LUNGHI (richiesta utente 2026-10-08): bottone Rsync e sync dopo
-    # flat/dark passano cap_minutes (60' la prima passata, 30' le successive);
+    # SYNC LUNGHI: bottone Rsync e sync dopo flat/dark passano cap_minutes
+    # (una passata sola da long_sync_minutes, 2026-10-13);
     # senza, vale per_run_cap_minutes (30', passate notturne invariate).
     # progress(res, secondi) e' chiamata ogni sync_module.progress_minutes con
     # i file COMPLETATI finora (res["copied"], res["bytes"]).
     res = {"ok": False, "files": 0, "error": None, "copied": 0, "bytes": 0}
+    t_call = time.monotonic()
     stop_tick = threading.Event()
     nas = sc["nas_dest"]
     if not is_mounted(nas):
@@ -2079,17 +2255,6 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
         cap_min = cap_minutes or sc.get("per_run_cap_minutes", 30)
         t_start = time.monotonic()
         deadline = t_start + cap_min * 60
-        if progress and not dry_run:
-            every = float(sc.get("progress_minutes", 9)) * 60
-
-            def _ticker():
-                while not stop_tick.wait(every):
-                    try:
-                        progress(res, time.monotonic() - t_start)
-                    except Exception as e:           # mai fermare la copia
-                        log.warning("avanzamento sync non inviato: %s", e)
-            ticker = threading.Thread(target=_ticker, daemon=True)
-            ticker.start()
         dest_root = Path(nas) / Path(mp).name   # /mnt/astronomia/asiair_sfro
         # conteggio elementi trasferiti + dettaglio per tipo (per il bottone
         # Rsync del bot): righe -i con 2° carattere 'f' = file veri (le
@@ -2148,13 +2313,15 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
                 return f"rsync rc={out.returncode}: {out.stderr.strip()[:200]}"
             return None
 
+        # L'elenco delle passate si decide UNA volta, prima di copiare: serve
+        # sia al conteggio iniziale dei sync lunghi sia alla copia.
         # 1) passata generale: tutto il resto della share (Preview, Live,
         #    Video, log, Plan) invariato. Le tre radici smistate per data sono
         #    escluse qui e gestite sotto.
         skip = []
         for rel in ("ASIAIR/Autorun/Flat", "ASIAIR/Autorun/Dark", LIGHT_ROOT):
             skip += ["--exclude", f"/{rel}/"]   # pota: niente scansione CIFS
-        err = one_pass(skip, mp, str(dest_root))
+        passes = [(skip, mp, str(dest_root), None)]
         # 2) passate per (cartella, data): stesso file -> sempre lo stesso
         #    percorso, quindi l'incrementale di rsync continua a funzionare.
         # FINESTRA DI DATE (2026-10-08): le passate automatiche copiano solo le
@@ -2170,7 +2337,7 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
         cutoff = ((datetime.now() - timedelta(days=win)).strftime("%Y%m%d")
                   if win > 0 else "")
         res["skipped_dates"] = 0
-        for rel, kind in ([] if err else dated_dirs(mp)):
+        for rel, kind in dated_dirs(mp):
             src = Path(mp) / rel
             dates, undated = split_by_date(src)
             if cutoff:
@@ -2178,15 +2345,40 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
                 res["skipped_dates"] += len(vecchie)
                 dates -= vecchie
             for d in sorted(dates):
-                err = one_pass(["--include", date_glob(d), "--exclude", "*"],
-                               str(src), str(dest_root / rel / d), kind)
-                if err:
-                    break
+                passes.append((["--include", date_glob(d), "--exclude", "*"],
+                               str(src), str(dest_root / rel / d), kind))
             # file dal nome non riconoscibile: restano nella radice come prima,
             # non si perde mai niente
-            if not err and undated:
-                err = one_pass(["--exclude", DATED_GLOB],
-                               str(src), str(dest_root / rel), kind)
+            if undated:
+                passes.append((["--exclude", DATED_GLOB],
+                               str(src), str(dest_root / rel), kind))
+
+        if progress and not dry_run:
+            # SYNC LUNGHI (messaggio «vivo», 2026-10-13): prima di copiare, lo
+            # stesso elenco di passate in --dry-run dice QUANTO c'e' da copiare
+            # (file e byte esatti, stessa scelta incrementale di rsync), per
+            # percentuale e fine stimata. Costa una scansione CIFS in piu' ed e'
+            # dentro il tempo massimo; oltre prescan_max (un quarto del tempo,
+            # al massimo 5') si rinuncia ai totali e si copia lo stesso.
+            prescan_max = min(300.0, cap_min * 60 / 4)
+            res["total_files"], res["total_bytes"] = _prescan(
+                passes, base, tail, t_start + prescan_max)
+            every = float(sc.get("progress_minutes", 9)) * 60
+
+            def _ticker():
+                # primo avanzamento SUBITO (coi totali), poi ogni `every`
+                wait = 0
+                while not stop_tick.wait(wait):
+                    wait = every
+                    try:
+                        progress(res, time.monotonic() - t_start)
+                    except Exception as e:           # mai fermare la copia
+                        log.warning("avanzamento sync non inviato: %s", e)
+            ticker = threading.Thread(target=_ticker, daemon=True)
+            ticker.start()
+        err = None
+        for p in passes:
+            err = one_pass(*p)
             if err:
                 break
         res["ok"] = err is None
@@ -2222,6 +2414,7 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
             log.error(res["error"])
     finally:
         stop_tick.set()          # niente avanzamenti dopo la fine della passata
+        res["elapsed_s"] = time.monotonic() - t_call
         # umount di una share CIFS morta (VPN giu') puo' bloccarsi: timeout
         # breve + fallback lazy; MAI sollevare da qui.
         try:
@@ -2360,10 +2553,11 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                   cfg.get("telegram", {}).get("enabled", True))
 
     def notify(text, keyboard=None):
+        """Ritorna il message_id (None in dry-run o se non inviato)."""
         if dry_run:
             log.info("[dry-run TG] %s", text)
-        else:
-            tg.send(text, keyboard)
+            return None
+        return tg.send(text, keyboard)
 
     alerts = state.setdefault("alerts", {})
     alert_cd = cfg.get("alert_cooldown_minutes", 30) * 60
@@ -2464,10 +2658,6 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
     # 30' di asciugatura si puo' annullare il flusso e riprendersi il rig.
     fc_req = Path(cfg.get("flat_cancel_request_file",
                           "/var/lib/sfro-agent/flat_cancel.json"))
-    # risposta alla domanda "continuo con altri 30'?" quando il sync dopo
-    # flat/dark non finisce nemmeno in 60'+30' (2026-10-08): la scrive il bot
-    ss_rep = Path(cfg.get("flat_sync_reply_file",
-                          "/var/lib/sfro-agent/sync_reply.json"))
 
     # --- Kasa: lettura stato ---
     kc, dev, managed, plug, kasa_err = _kasa_connect(cfg, files, http_cfg, tu)
@@ -2847,12 +3037,10 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             notify(f"🌑 Dark flat {lbl} (gain {gain}) avviati ({det_cfg}). "
                    f"Pose: {ttxt}.")
 
-        def ask_shutdown(again=False, incompleto=False):
+        def ask_shutdown(again=False):
             """Domanda a bottoni di fine flusso MANUALE: spengo o lascio acceso?
             I bottoni li serve il bot (callback fs:yes / fs:no)."""
             notify(("🌓 Flat e dark completati e sincronizzati sul NAS.\n"
-                    if not again and not incompleto else
-                    "🌓 Flat e dark completati (sync NAS INCOMPLETO).\n"
                     if not again else
                     "❓ Aspetto ancora la risposta (flat e dark sono finiti).\n")
                    + "Spengo l'ASIAIR e tolgo corrente alle prese?",
@@ -3106,133 +3294,89 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 notify(f"⚠️ Fascia anticondensa NON riportata al {hv}% ({deth}); "
                        "proseguo.")
             state["flat_stage"] = "sync"
-            state["flat_sync_passes"] = 0
-            state["flat_sync_files"] = 0
             stage = "sync"          # stesso ciclo: la prima passata parte subito
-
-        def ask_sync(again=False):
-            """Domanda a bottoni quando il sync non finisce nemmeno in 60'+30'
-            (2026-10-08). I bottoni li serve il bot (callback ss:more/ss:stop)."""
-            more = int(sc.get("long_more_minutes", 30))
-            notify((f"⚠️ Sync NAS non ancora finito dopo "
-                    f"{state.get('flat_sync_passes', 0)} passate "
-                    f"({state.get('flat_sync_files', 0)} file copiati): gli "
-                    "altri sono ancora solo sull'ASIAIR.\n"
-                    if not again else
-                    "❓ Aspetto ancora la risposta sul sync NAS incompleto.\n")
-                   + f"Continuo con altri {more} minuti di copia?",
-                   keyboard=[[{"text": f"✅ Sì, altri {more}'",
-                               "callback_data": "ss:more"},
-                              {"text": "⏹ No, basta così",
-                               "callback_data": "ss:stop"}]])
-
-        sync_skip = False
-        if stage == "ask_sync":
-            # in attesa della risposta (file di reply dal bot). Senza risposta
-            # si ridomanda ogni status_int; oltre manual_ask_timeout_minutes si
-            # sceglie la via prudente indicata dall'utente: "normalmente non
-            # vorrei spegnere se il sync non e' completo" -> STOP, rig acceso.
-            try:
-                rep = json.loads(ss_rep.read_text())
-            except Exception:
-                rep = None
-            if rep is None:
-                asked = datetime.fromisoformat(state.get("flat_sync_ask_ts",
-                                                         now.isoformat()))
-                tmo = float(ff.get("manual_ask_timeout_minutes", 60))
-                if (now - asked).total_seconds() > tmo * 60:
-                    return fail(f"sync NAS incompleto e nessuna risposta entro "
-                                f"{int(tmo)} min: NON spengo, i file mancanti "
-                                "sono ancora sull'ASIAIR (usa /sfro → Rsync).")
-                if status_due("flat_sync_ask_reminder_ts"):
-                    status_sent("flat_sync_ask_reminder_ts")
-                    ask_sync(again=True)
-                return
-            ss_rep.unlink(missing_ok=True)
-            state.pop("flat_sync_ask_ts", None)
-            state.pop("flat_sync_ask_reminder_ts", None)
-            state["flat_stage"] = stage = "sync"
-            if rep.get("answer") != "more":
-                # "basta cosi'": si chiude il flusso come se il sync fosse
-                # finito (spegnimento o domanda), con l'avviso dei file rimasti
-                sync_skip = True
-                notify("⚠️ Sync NAS lasciato INCOMPLETO su tua richiesta "
-                       f"({state.get('flat_sync_files', 0)} file copiati): i "
-                       "file mancanti restano sull'ASIAIR, li recupera un "
-                       "Rsync dal menù alla prossima accensione.")
 
         if stage == "sync":
             # SYNC FINALE COME FASE A SE' (2026-09-15). I flat vanno sul NAS
-            # (restano FUORI dal log Sheets). Un tetto raggiunto con l'ASIAIR
-            # raggiungibile NON e' un errore: copia lunga, si resta qui e al
-            # ciclo dopo riparte (rsync salta il gia' copiato). Il riposo del
-            # rig e' gia' fatto e non si ripete.
-            # TEMPI (richiesta utente 2026-10-08, dopo i 12 GB di flat+dark
-            # LRGB copiati a ~2 MB/s): 1a passata long_first_minutes (60'), 2a
-            # long_more_minutes (30'); se non basta si CHIEDE se continuare con
-            # altri 30' (fase ask_sync) invece di spegnere a copia incompleta.
-            # Ogni progress_minutes (9') un messaggio coi file copiati finora.
-            # Errori veri (NAS, ASIAIR muto, rsync rc) -> STOP.
+            # (restano FUORI dal log Sheets).
+            # UNA SOLA PASSATA, MAI RIPARTITA DA SOLA (richiesta utente
+            # 2026-10-13), identica al bottone Rsync del bot (stessi testi). Il 13/10 la passata da 60' girava in un servizio con
+            # TimeoutStartSec=45min: systemd l'ha uccisa due volte, lo stato
+            # (salvato solo a fine ciclo) e' andato perso e ogni ciclo dopo ha
+            # rifatto dark completati -> cooler/fascia -> sync da zero, con gli
+            # avanzamenti ogni 9' ripartiti a "passata 1, 0 file". Ora: timeout
+            # del servizio 2h, una passata da sync_module.long_sync_minutes;
+            # se non basta (o se il ciclo muore a meta') si chiude il flusso in
+            # 'sync_incomplete', rig ACCESO, e il resto lo rilancia l'utente
+            # da Telegram (Rsync, poi Spegni). Errori veri -> STOP.
             # Avviso a INIZIO e FINE (richiesta utente: rsync via VPN lento)
             if dry_run:
                 log.info("[dry-run] flat flow: sync finale + chiusura")
                 return
-            chi = sc.get("enabled") and not sync_skip and sync_busy(sc)
+
+            COSA = "Sync NAS flat/dark"
+
+            def sync_incomplete(text):
+                state["flat_stage"] = "sync_incomplete"
+                state["flat_error"] = f"{now.isoformat()} {text}"
+                state.pop("flat_sync_started_ts", None)
+                log.warning("Flusso flat: %s", text)
+                notify(text + "\nNON spengo: rig lasciato acceso, a copia "
+                       "finita spegni da /sfro.")
+
+            if state.get("flat_sync_started_ts"):
+                # passata partita in un ciclo precedente e mai chiusa: il ciclo
+                # e' morto a meta' (timeout systemd, crash). Niente ripartenza.
+                t0 = datetime.fromisoformat(state["flat_sync_started_ts"])
+                return sync_incomplete(
+                    f"⚠️ {COSA} interrotto (partito alle "
+                    f"{t0.astimezone(ZoneInfo('Europe/Rome')):%H:%M}, il ciclo "
+                    "dell'agente si è fermato durante la copia). I file "
+                    "mancanti sono ancora solo sull'ASIAIR: non riparto da "
+                    "solo, rilancia da /sfro → Rsync (i file già copiati si "
+                    "saltano).")
+            chi = sc.get("enabled") and sync_busy(sc)
             if chi:
                 # un Rsync dal menu' sta gia' copiando: si aspetta che finisca
-                # (la passata non conta) e lo si dice UNA volta sola
+                # e lo si dice UNA volta sola
                 if not state.get("flat_sync_wait_ts"):
                     state["flat_sync_wait_ts"] = now.isoformat()
-                    notify(f"⏸ Sync NAS dei flat in attesa: è in corso il {chi}. "
+                    notify(f"⏸ Sync NAS flat/dark in attesa: è in corso il {chi}. "
                            "Riparto quando ha finito (i file già copiati si "
                            "saltano).")
                 return
             state.pop("flat_sync_wait_ts", None)
-            if sc.get("enabled") and not sync_skip:
-                n = int(state.get("flat_sync_passes") or 0) + 1
-                state["flat_sync_passes"] = n
-                cap = int(sc.get("long_first_minutes", 60) if n == 1
-                          else sc.get("long_more_minutes", 30))
-                base_files = int(state.get("flat_sync_files") or 0)
-                notify("💾 Sync NAS dei flat avviato ("
-                       + (f"passata {n}, " if n > 1 else "")
-                       + f"al massimo {cap} minuti)…")
+            if sc.get("enabled"):
+                cap = int(sc.get("long_sync_minutes", 100))
+                # messaggio «vivo»: avvio qui, avanzamenti modificati al suo
+                # posto, stato finale scritto dentro (2026-10-13)
+                live = SyncLive(COSA, sc, notify, tg.edit)
                 sync_mark()   # passata fissa: la periodica non riparte subito
+                # SALVATO SUBITO: se il ciclo muore durante la copia, quello
+                # dopo trova la fase sync gia' avviata (e non ripete dark,
+                # cooler, fascia ne' il sync)
+                state["flat_sync_started_ts"] = now.isoformat()
+                save_state(Path(cfg.get("state_file", str(HERE / "state.json"))),
+                           state)
 
-                def _avanza(rr, sec):
-                    notify(sync_progress_text(base_files + rr["copied"],
-                                              rr["bytes"], sec, f"passata {n}"))
-                r = sync_pass(sc, dry_run, cfg, cap_minutes=cap, progress=_avanza)
+                r = sync_pass(sc, dry_run, cfg, cap_minutes=cap,
+                              progress=live.tick)
+                state.pop("flat_sync_started_ts", None)
+                live.close(r, "completato ✅" if r.get("ok") else
+                           "NON completato" if r.get("cap") else
+                           "non avviato" if r.get("busy") else "in errore")
                 if r.get("busy"):         # preso da un altro tra controllo e avvio
-                    state["flat_sync_passes"] = n - 1
                     state["flat_sync_wait_ts"] = now.isoformat()
-                    notify(f"⏸ Sync NAS dei flat in attesa: è in corso il "
+                    notify(f"⏸ Sync NAS flat/dark in attesa: è in corso il "
                            f"{r['busy']}. Riparto quando ha finito.")
                     return
-                state["flat_sync_files"] = base_files + int(r.get("copied") or 0)
                 if r.get("cap"):
-                    if n == 1:
-                        notify(f"⏳ Sync NAS: {cap} minuti non bastano "
-                               f"({state['flat_sync_files']} file copiati, copia "
-                               "lunga, non un guasto). Al prossimo ciclo una "
-                               f"seconda passata di {sc.get('long_more_minutes', 30)}"
-                               " minuti: i file già copiati si saltano.")
-                        return
-                    state["flat_stage"] = "ask_sync"
-                    state["flat_sync_ask_ts"] = now.isoformat()
-                    state.pop("flat_sync_ask_reminder_ts", None)
-                    ss_rep.unlink(missing_ok=True)   # eventuale risposta vecchia
-                    ask_sync()
-                    return
+                    return sync_incomplete(sync_cap_text(COSA, sc, r))
                 if r.get("error"):
                     return fail(f"sync NAS finale in errore: {r['error']}"
                                 + ". Spegnimento ANNULLATO.")
                 sess = SG.riepilogo(r["sess"]) if SG and r.get("sess") else ""
-                notify(f"💾 Sync NAS completato ({state['flat_sync_files']} file "
-                       "copiati, flat inclusi" + (f", {n} passate" if n > 1 else "")
-                       + ")." + ("\n" + sess if sess else ""))
-            state.pop("flat_sync_passes", None)
-            state.pop("flat_sync_files", None)
+                notify(sync_done_text(COSA, r) + ("\n" + sess if sess else ""))
             # FLAT/DARK MANUALI dal bot (2026-08-01): lo spegnimento NON e'
             # automatico, si CHIEDE. Lo esegue poi il bot (do_shutdown, che
             # ripassa la fascia al valore di riposo: innocuo, e' gia' li').
@@ -3242,7 +3386,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 state["flat_ask_ts"] = now.isoformat()
                 state.pop("flat_ask_reminder_ts", None)
                 mf_rep.unlink(missing_ok=True)   # eventuale risposta vecchia
-                ask_shutdown(incompleto=sync_skip)
+                ask_shutdown()
                 return
             # cooler, anti-dew e fascia sono gia' a riposo (bloccotto sopra,
             # prima del sync): qui resta solo lo spegnimento vero e proprio.
@@ -3700,7 +3844,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                   "flat_letters", "flat_times", "dark_groups", "flat_cool_ts",
                   "flat_manual", "flat_ask_shutdown", "flat_ask_ts",
                   "flat_ask_reminder_ts", "flat_cancel_ts", "flat_sync_passes",
-                  "flat_sync_files", "flat_sync_ask_ts",
+                  "flat_sync_files", "flat_sync_ask_ts", "flat_sync_started_ts",
                   "flat_sync_ask_reminder_ts", "flat_sync_wait_ts",
                   "weather_closed", "weather_manual", "weather_restart_done",
                   "weather_reopen_notified", "weather_idle_ts",
@@ -4102,6 +4246,12 @@ def main():
         save_state(state_path, state)
         return
 
+    # SIGTERM (systemd allo scadere di TimeoutStartSec, o uno stop) -> uscita
+    # ORDINATA: senza, Python muore senza eseguire il finally e lo stato del
+    # ciclo va perso. Il 13/10 il ciclo dopo ha cosi' rifatto dark, cooler,
+    # fascia e sync gia' annunciati (due volte).
+    import signal
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         pub = run_cycle(cfg, state, files, dry_run=args.dry_run or args.status)
     finally:

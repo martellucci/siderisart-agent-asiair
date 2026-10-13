@@ -93,7 +93,10 @@ abilitarli.
 > servizi `Type=oneshot` systemd disattiva il timeout *per default*: un ciclo
 > appeso — per esempio su una CIFS morta, in D-state — bloccherebbe il timer
 > **per sempre**, e l'agente smetterebbe di girare senza che nessuno se ne
-> accorga. Il valore è dimensionato sul caso peggiore (sync finale + teardown).
+> accorga. Il valore è dimensionato sul caso peggiore (sync finale + teardown) e
+> **deve superare la passata di sync più lunga**
+> (`sync_module.long_sync_minutes`, 100 minuti → `TimeoutStartSec=2h`): un
+> timeout più corto della passata uccide la copia a metà, ogni volta.
 
 ## 5. Dashboard (opzionale)
 

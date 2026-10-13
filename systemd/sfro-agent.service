@@ -10,5 +10,7 @@ ExecStart=/usr/bin/python3 /opt/sfro-agent/sfro_agent.py --config /opt/sfro-agen
 User=root
 # Per gli oneshot systemd DISABILITA il timeout di default: un ciclo appeso
 # (es. CIFS in D-state a VPN giu') bloccherebbe il timer PER SEMPRE.
-# 45 min = sync finale (cap 30 min) + teardown/flat con margine.
-TimeoutStartSec=45min
+# 2h (2026-10-13; prima 45 min): il sync dopo flat/dark e' UNA passata da
+# sync_module.long_sync_minutes (100') + dark/cooler/fascia/sessioni con margine.
+# Il 13/10 i 45 min hanno ucciso due volte una passata da 60'.
+TimeoutStartSec=2h

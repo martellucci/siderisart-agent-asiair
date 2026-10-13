@@ -87,11 +87,14 @@ le stesse serate perse.
 - **Dark flat** subito dopo, a pannello spento, con la posa esatta calcolata dai
   flat appena fatti. Il cooler resta acceso fino all'ultimo dark; solo dopo il
   rig va a riposo (cooler e scaldiglie spenti) mentre i file vengono copiati.
-- **Sync finale a passate**: 60 minuti, poi in automatico altri 30, con un
-  messaggio Telegram ogni 9 minuti col numero di file copiati finora. Se non
-  basta ancora **chiede** se continuare con altri 30 minuti: su una linea lenta
-  una copia lunga non è un errore, e il rig **non si spegne mai con il sync
-  incompleto** se non sei tu a dirlo.
+- **Sync finale in una passata**: al massimo 100 minuti, mai ripartita da sola.
+  Prima un giro a vuoto conta esattamente cosa manca, poi un unico **messaggio
+  Telegram «vivo»** viene modificato al suo posto ogni 9 minuti (senza
+  notifica) con barra di avanzamento, file e GB sul totale, velocità e fine
+  stimata — e avvisa se la stima va oltre il tempo massimo. La fine arriva come
+  messaggio nuovo. Se il tempo finisce il rig **resta acceso** e **non si spegne
+  mai con il sync incompleto**: ripremi Rsync e la copia riprende da dove era
+  arrivata.
 - `pi_shutdown`, attesa che il box sia **davvero** morto, e solo allora stacca
   la corrente dalle prese smart.
 
@@ -99,8 +102,8 @@ le stesse serate perse.
 
 - **Bot Telegram** con menu a bottoni: stato, avvio, avvio piano, sync manuale,
   flat/dark a comando, spegnimento — tutte le operazioni pericolose con conferma.
-  Il sync manuale usa le stesse passate da 60 + 30 minuti e gli stessi messaggi
-  di avanzamento.
+  Il sync manuale segue **esattamente la stessa procedura**: una passata, lo
+  stesso messaggio «vivo», gli stessi testi.
 - **Un sync alla volta**: bot e agente condividono un lock (`flock`), così due
   copie non si contendono mai lo stesso mount. Chi arriva secondo non parte — la
   passata notturna salta in silenzio, il sync dopo i flat aspetta, il bottone
@@ -315,12 +318,13 @@ Questo è il valore vero del progetto. Ogni riga qui sotto è una serata persa.
 | **Float del firmware** | Scrivi una posa di `8.19` s, la rileggi come `8.190001` e il confronto esatto fallisce. | Pose arrotondate a 1 decimale e confronto con tolleranza di 5 ms. |
 | **ASIAIR spento = socket zombie** | Il box spento non manda FIN/RST: la connessione di guida resta aperta per sempre e la telemetria muore **in silenzio**. | TCP keepalive + riconnessione forzata se il socket tace oltre N secondi. |
 | **`rsync` rc=24** | "File vanished": un FITS ancora in scrittura sull'ASIAIR. Trattarlo come errore fatale annullava tutto lo spegnimento. | Tollerato come avviso: il file si riprende al sync successivo. |
-| **Una linea lenta sembra un blocco** | A ~2 MB/s dal sito remoto, 12 GB di flat e dark richiedono ben più di un'ora. Ogni passata da 30 minuti arrivava al tetto, il bot diceva "errore" e si fermava, e senza nessun segnale in mezzo sembrava piantato — il server è stato riavviato per niente. | Passate lunghe (60 + 30 minuti, poi una domanda), output di rsync letto in diretta e un messaggio ogni 9 minuti col conteggio dei file. |
+| **Una linea lenta sembra un blocco** | A ~2 MB/s dal sito remoto, 12 GB di flat e dark richiedono ben più di un'ora. Ogni passata da 30 minuti arrivava al tetto, il bot diceva "errore" e si fermava, e senza nessun segnale in mezzo sembrava piantato — il server è stato riavviato per niente. | Passate lunghe, output di rsync letto in diretta e un messaggio di avanzamento col conteggio dei file. Oggi: una passata da 100 minuti e un messaggio «vivo» con percentuale e fine stimata. |
 | **Ripulire il mirror fa riscaricare tutto** | rsync rende la destinazione uguale alla sorgente: cancelli i flat vecchi sul NAS ma non sull'ASIAIR, e le passate dopo li ricopiano tutti — cinque ore di flat vecchi in coda **davanti** ai light della notte. | Si pulisce prima l'ASIAIR, poi il NAS. Le passate automatiche guardano comunque solo gli ultimi giorni (`recent_days`); il bottone del sync manuale no, per scelta. |
 | **Due sync sullo stesso mount** | Il sync manuale del bot e la passata periodica dell'agente possono partire insieme: ognuno monta e smonta la share, togliendola da sotto all'altro. | Un `flock` non bloccante: un sync alla volta, rilasciato dal kernel se chi lo tiene muore. |
 | **Tempo AUTO dei flat al tetto** | A gain 0 e pannello al 50% il tempo calcolato tocca il limite di 15 s e talvolta il calcolo **fallisce**: l'autorun non parte proprio. | Luminosità del pannello diversa per gain, così la posa cade in mezzo alla finestra utile. |
 | **L'ASIAIR ammucchia i frame** | Tutte le notti finiscono nella stessa cartella per tipo, e non è configurabile. | Lo smistamento per data lo fa il sync **in destinazione**, leggendo la data dal nome file. |
 | **Timeout systemd sugli oneshot** | È **disabilitato** di default: un ciclo appeso su una CIFS morta blocca il timer **per sempre**. | `TimeoutStartSec` esplicito nella unit. |
+| **Un timeout più corto del lavoro** | La passata di sync era salita a 60 minuti, ma la unit diceva ancora `TimeoutStartSec=45min`. systemd ha ucciso il ciclo due volte a metà copia; il SIGTERM chiude Python **senza** eseguire il `finally`, quindi lo stato andava perso e ogni ciclo dopo riannunciava "dark completati", rispegneva il cooler e ripartiva col sync da zero — la chat si è riempita di messaggi sovrapposti che ricontavano da zero. | Il timeout deve superare la passata più lunga (ora 2 h per 100 minuti). Stato salvato **prima** della copia, SIGTERM trasformato in un'uscita ordinata, e una passata trovata già avviata **non** riparte mai. |
 
 ---
 
