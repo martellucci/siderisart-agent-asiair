@@ -6,6 +6,7 @@ Layout prodotto (richiesta utente 2026-09-17):
 
     <dest>/<soggetto>/<aaaammgg notte>/light/   i light di quel soggetto
                                        /flat/   flat dei SUOI filtri+gain
+                                                (e del SUO angolo, 2026-10-24)
                                        /dark/   dark dei SUOI filtri+gain
 
 I flat e i dark della notte sono UNICI ma servono a piu' soggetti: compaiono
@@ -32,6 +33,14 @@ non coincide con nessuna delle due: si converte sempre dall'istante.
 
 Filtro e gain si leggono dal NOME FILE: per i flat e i dark e' l'unica fonte
 possibile, perche' nel database del diario ci sono solo i light.
+
+ROTATORE CAA (richiesta utente 2026-10-24): i flat si fanno all'angolo di
+ripresa di ogni soggetto, quindi un soggetto riceve solo i flat del SUO angolo
+(`_12deg_` nel nome, angolo in cielo). Il confronto e' a meno di 180°: al
+meridian flip l'angolo in cielo salta di 180° ma il rotatore non si muove, e
+12° e 192° sono la stessa posizione. Tolleranza angle_tolerance_deg. I dark
+non ruotano: restano abbinati per filtro+gain. Nomi senza angolo -> nessun
+filtro sull'angolo (come prima).
 """
 from __future__ import annotations
 
@@ -55,6 +64,7 @@ DEFAULTS = {
     # fuso che DA' IL NOME alla cartella-data: quello di casa, non quello
     # dell'osservatorio (2026-09-18). Non c'entra col night_id del diario.
     "folder_timezone": "Europe/Rome",
+    "angle_tolerance_deg": 2,
 }
 
 LIGHT_REL = "Plan/Light"
@@ -65,6 +75,7 @@ SUBDIRS = {"light": "light", "flat": "flat", "dark": "dark"}
 # Il gruppo centrale e' <camera> oppure <camera>_<filtro>: con una camera a
 # colori il token filtro non c'e' e i frame si accoppiano solo tra loro.
 FNAME = re.compile(r"_Bin\d+_(.+?)_gain(\d+)_(\d{8})-(\d{6})_")
+DEG = re.compile(r"_(-?\d+(?:\.\d+)?)deg_")
 
 
 def sg_cfg(cfg: dict) -> dict:
@@ -82,7 +93,8 @@ def src_root(cfg: dict) -> Path:
 
 
 def parse_name(name: str) -> dict | None:
-    """(filtro, gain, istante UTC) dal nome file, None se non riconoscibile."""
+    """(filtro, gain, istante UTC, angolo) dal nome file, None se non
+    riconoscibile. angolo = None se il nome non lo porta."""
     m = FNAME.search(name)
     if not m:
         return None
@@ -91,9 +103,20 @@ def parse_name(name: str) -> dict | None:
         dt = datetime.strptime(m.group(3) + m.group(4), "%Y%m%d%H%M%S")
     except ValueError:
         return None
+    a = DEG.search(name)
     return {"filter": mid[1] if len(mid) > 1 else None,
             "gain": int(m.group(2)),
-            "utc": dt.replace(tzinfo=timezone.utc)}
+            "utc": dt.replace(tzinfo=timezone.utc),
+            "angle": float(a.group(1)) if a else None}
+
+
+def same_angle(a, b, tol: float) -> bool:
+    """Stesso angolo del rotatore a meno di 180° (meridian flip). Un angolo
+    mancante non esclude nulla."""
+    if a is None or b is None:
+        return True
+    d = (a - b) % 180
+    return min(d, 180 - d) <= tol
 
 
 def night_of(dt_utc: datetime, tz: ZoneInfo) -> str:
@@ -118,8 +141,8 @@ def utc_dirs(nights) -> set:
 
 def scan(root: Path, nights: set, tz: ZoneInfo) -> tuple:
     """(light, calib) delle notti richieste.
-    light: [(path, soggetto, notte, filtro, gain)]
-    calib: [(path, tipo, notte, filtro, gain)]"""
+    light: [(path, soggetto, notte, filtro, gain, angolo)]
+    calib: [(path, tipo, notte, filtro, gain, angolo)]"""
     lights, calib, skipped = [], [], 0
     dirs = utc_dirs(nights)
 
@@ -157,7 +180,8 @@ def scan(root: Path, nights: set, tz: ZoneInfo) -> tuple:
                 for p, i in frames(sub / d):
                     nid = night_of(i["utc"], tz)
                     if nid in nights:
-                        lights.append((p, sub.name, nid, i["filter"], i["gain"]))
+                        lights.append((p, sub.name, nid, i["filter"],
+                                       i["gain"], i["angle"]))
 
     for rel, kind in CALIB_RELS:
         for d in dirs:
@@ -167,7 +191,8 @@ def scan(root: Path, nights: set, tz: ZoneInfo) -> tuple:
             for p, i in frames(cd):
                 nid = night_of(i["utc"], tz)
                 if nid in nights:
-                    calib.append((p, kind, nid, i["filter"], i["gain"]))
+                    calib.append((p, kind, nid, i["filter"], i["gain"],
+                                  i["angle"]))
     return lights, calib, skipped
 
 
@@ -217,26 +242,33 @@ def aggiorna(cfg: dict, nights=None, dry_run: bool = False) -> dict:
     # filtri+gain usati da OGNI soggetto in OGNI notte: le calibrazioni
     # seguono il singolo soggetto, non la notte intera (scelta utente
     # 2026-09-17: un soggetto ripreso solo in H non si porta i flat L)
+    # e gli ANGOLI di ognuno (rotatore, 2026-10-24): {(filtro, gain): {angoli}}
     usati = {}
-    for _p, sogg, nid, filt, gain in lights:
-        usati.setdefault((sogg, nid), set()).add((filt, gain))
+    for _p, sogg, nid, filt, gain, ang in lights:
+        usati.setdefault((sogg, nid), {}).setdefault((filt, gain), set()).add(ang)
+    tol = float(c.get("angle_tolerance_deg", 2))
+
+    def serve(kind, ang, angoli):
+        return kind != "flat" or any(same_angle(ang, a, tol) for a in angoli)
     res["soggetti"] = len(usati)
     if dry_run:
         for (sogg, nid), pairs in sorted(usati.items()):
             n_l = sum(1 for x in lights if x[1] == sogg and x[2] == nid)
             det = " ".join(f"{f or '-'}/g{g}" for f, g in sorted(
                 pairs, key=lambda x: (x[0] or "", x[1])))
-            n_c = sum(1 for _p, _k, n, f, g in calib
-                      if n == nid and (f, g) in pairs)
+            n_c = sum(1 for _p, k, n, f, g, a in calib
+                      if n == nid and (f, g) in pairs
+                      and serve(k, a, pairs[(f, g)]))
             print(f"{sogg} / {nid}: {n_l} light, {n_c} calib  [{det}]")
         return res
 
-    for p, sogg, nid, _f, _g in lights:
+    for p, sogg, nid, _f, _g, _a in lights:
         res["_kind"] = "light"
         _link(p, dest / sogg / nid / SUBDIRS["light"] / p.name, c["mode"], res)
-    for p, kind, nid, filt, gain in calib:
+    for p, kind, nid, filt, gain, ang in calib:
         for (sogg, n), pairs in usati.items():
-            if n == nid and (filt, gain) in pairs:
+            if (n == nid and (filt, gain) in pairs
+                    and serve(kind, ang, pairs[(filt, gain)])):
                 res["_kind"] = kind
                 _link(p, dest / sogg / nid / SUBDIRS[kind] / p.name,
                       c["mode"], res)

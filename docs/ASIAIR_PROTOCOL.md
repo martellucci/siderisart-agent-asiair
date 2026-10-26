@@ -9,8 +9,9 @@
 > safeguard. I'm publishing them as they were, because that's the form in which
 > they're actually useful.
 >
-> **Validated on firmware v1.** From v3 onwards port 4700 requires an RSA
-> handshake: see [CREDENTIALS.md](CREDENTIALS.md).
+> **Validated on firmware v1 and v3.** From v3 onwards port 4700 requires an
+> RSA handshake, which `asiair_client.py` performs. The key comes from the app,
+> see [CREDENTIALS.md](CREDENTIALS.md).
 >
 > ZWO can change any of this in any update, without telling anyone. If your box
 > behaves differently, please open an issue — that's how this map grows.
@@ -399,6 +400,10 @@ The private key lives inside the app's APK (`classes6.dex`); asiair-tool has
 
 ➡️ **An ASIAIR firmware update would disable the agent** — not the telemetry, the
 commands themselves. Don't update without implementing the handshake first.
+
+**Update, October 2026**: the handshake is in `asiair_client.py` (`connect()`)
+and covers every command of every flow. The box moved to firmware v3 on
+24 October and the agent was tested on it on 26 October.
 
 ### Port 4800 — how image data is framed
 

@@ -115,7 +115,7 @@ A.ping = lambda h: True
 # test e' tornato rosso da solo qualche giorno dopo (scoperto il 2026-10-08).
 from datetime import datetime, timedelta, timezone              # noqa: E402
 D = datetime.now(timezone.utc).strftime("%Y%m%d")
-FLAT = f"Flat_1.2s_Bin1_2600MM_H_gain100_{D}-140000_12deg_0.1C_0001.fit"
+FLAT = f"Flat_1.2s_Bin1_2600MM_H_gain100_{D}-140000_1deg_0.1C_0001.fit"
 src = Path(TMP) / "asiair_sfro" / "ASIAIR"
 (src / f"Plan/Light/NGC 7000/{D}").mkdir(parents=True, exist_ok=True)
 (src / f"Autorun/Flat/{D}").mkdir(parents=True, exist_ok=True)

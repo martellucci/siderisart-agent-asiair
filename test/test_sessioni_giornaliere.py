@@ -60,11 +60,11 @@ mk(f"Plan/Light/{S2}/20260917", "Light_M 42_60.0s_Bin1_2600MM_L_gain0_20260917-2
 mk(f"Plan/Light/{S2}/20260917", "Light_M 42_60.0s_Bin1_2600MM_L_gain0_20260917-020000_1deg_0.0C_0009.fit")
 # calibrazioni del mattino dopo: 20260918-140000 UTC = 18/9 09:00 questo sito =
 # 18/9 16:00 in Italia -> stessa cartella dei light della sera
-mk("Autorun/Flat/20260918", "Flat_1.2s_Bin1_2600MM_H_gain100_20260918-140000_12deg_0.1C_0001.fit")
-mk("Autorun/Flat/20260918", "Flat_3.4s_Bin1_2600MM_L_gain0_20260918-140100_12deg_0.1C_0001.fit")
-mk("Autorun/Flat/20260918", "Flat_2.0s_Bin1_2600MM_S_gain75_20260918-140200_12deg_0.1C_0001.fit")
-mk("Autorun/Dark/20260918", "Dark_1.2s_Bin1_2600MM_H_gain100_20260918-141000_12deg_0.1C_0001.fit")
-mk("Autorun/Dark/20260918", "Dark_3.4s_Bin1_2600MM_L_gain0_20260918-141100_12deg_0.1C_0001.fit")
+mk("Autorun/Flat/20260918", "Flat_1.2s_Bin1_2600MM_H_gain100_20260918-140000_1deg_0.1C_0001.fit")
+mk("Autorun/Flat/20260918", "Flat_3.4s_Bin1_2600MM_L_gain0_20260918-140100_1deg_0.1C_0001.fit")
+mk("Autorun/Flat/20260918", "Flat_2.0s_Bin1_2600MM_S_gain75_20260918-140200_1deg_0.1C_0001.fit")
+mk("Autorun/Dark/20260918", "Dark_1.2s_Bin1_2600MM_H_gain100_20260918-141000_1deg_0.1C_0001.fit")
+mk("Autorun/Dark/20260918", "Dark_3.4s_Bin1_2600MM_L_gain0_20260918-141100_1deg_0.1C_0001.fit")
 # nome fuori standard: deve essere saltato con avviso, non collegato
 mk("Autorun/Flat/20260918", "Flat_senza_data_ne_gain.fit")
 
@@ -83,8 +83,8 @@ assert len(ck(f"{S2}/{N}/light")) == 1, ck(f"{S2}/{N}/light")
 # la cartella col giorno dell'OSSERVATORIO non deve esistere
 assert not (DEST / S1 / "20260917").exists(), "data USA invece di quella italiana"
 # ogni soggetto ha SOLO le calibrazioni del proprio filtro+gain
-assert ck(f"{S1}/{N}/flat") == ["Flat_1.2s_Bin1_2600MM_H_gain100_20260918-140000_12deg_0.1C_0001.fit"], ck(f"{S1}/{N}/flat")
-assert ck(f"{S2}/{N}/flat") == ["Flat_3.4s_Bin1_2600MM_L_gain0_20260918-140100_12deg_0.1C_0001.fit"], ck(f"{S2}/{N}/flat")
+assert ck(f"{S1}/{N}/flat") == ["Flat_1.2s_Bin1_2600MM_H_gain100_20260918-140000_1deg_0.1C_0001.fit"], ck(f"{S1}/{N}/flat")
+assert ck(f"{S2}/{N}/flat") == ["Flat_3.4s_Bin1_2600MM_L_gain0_20260918-140100_1deg_0.1C_0001.fit"], ck(f"{S2}/{N}/flat")
 assert ck(f"{S1}/{N}/dark")[0].startswith("Dark_1.2s"), ck(f"{S1}/{N}/dark")
 assert ck(f"{S2}/{N}/dark")[0].startswith("Dark_3.4s"), ck(f"{S2}/{N}/dark")
 # il filtro S non e' stato usato da nessuno: non deve comparire da nessuna parte
@@ -93,7 +93,7 @@ assert not list(DEST.rglob("*_S_gain75_*")), list(DEST.rglob("*_S_gain75_*"))
 assert not (DEST / S2 / "20260917").exists()
 
 # hardlink: stesso inode dell'originale, niente spazio in piu'
-src = SRC / "Autorun/Flat/20260918/Flat_1.2s_Bin1_2600MM_H_gain100_20260918-140000_12deg_0.1C_0001.fit"
+src = SRC / "Autorun/Flat/20260918/Flat_1.2s_Bin1_2600MM_H_gain100_20260918-140000_1deg_0.1C_0001.fit"
 dst = DEST / S1 / N / "flat" / src.name
 assert src.stat().st_ino == dst.stat().st_ino, "hardlink non condiviso"
 print("hardlink: inode condiviso", src.stat().st_ino)
@@ -110,6 +110,19 @@ r3 = S.aggiorna(CFG, [N])
 assert r3["light"] == 1 and r3["flat"] == 1 and r3["dark"] == 1, r3
 assert (DEST / "SH2-132" / N / "flat" / src.name).stat().st_ino == src.stat().st_ino
 print("stesso flat sotto due soggetti, un solo file su disco")
+
+# ROTATORE CAA (2026-10-24): un soggetto riceve solo i flat del SUO angolo, a
+# meno dei 180° del meridian flip; i dark non ruotano
+assert S.same_angle(1, 181, 2) and S.same_angle(359, 1, 2), "flip e giro"
+assert not S.same_angle(1, 40, 2)
+assert S.same_angle(None, 40, 2), "nome senza angolo: nessun filtro"
+assert S.parse_name("Flat_1.4s_Bin1_2600MM_H_gain100_20260918-150100_40deg_0.1C_0001.fit")["angle"] == 40.0
+mk("Autorun/Flat/20260918", "Flat_1.3s_Bin1_2600MM_H_gain100_20260918-150000_181deg_0.1C_0001.fit")
+mk("Autorun/Flat/20260918", "Flat_1.4s_Bin1_2600MM_H_gain100_20260918-150100_40deg_0.1C_0001.fit")
+r4 = S.aggiorna(CFG, [N])
+assert r4["flat"] == 2, r4           # 181° sotto LDN 1295 e SH2-132, 40° a nessuno
+assert not list(DEST.rglob("*_40deg_*")), list(DEST.rglob("*_40deg_*"))
+print("flat abbinati all'angolo del soggetto, flip compreso")
 
 # modulo disabilitato: non tocca niente
 off = dict(CFG, sessioni_giornaliere=dict(CFG["sessioni_giornaliere"], enabled=False))

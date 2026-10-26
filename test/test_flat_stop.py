@@ -155,6 +155,12 @@ def msg_has(frag):
     return any(frag in m for m in MSGS)
 
 
+def msg_all(*frags):
+    """Un solo messaggio con tutti i frammenti: il riquadro «vivo» (2026-10-20)
+    tiene in testa la riga di avvio del gruppo e sotto l'avanzamento."""
+    return any(all(f in m for f in frags) for m in MSGS)
+
+
 def no_flat_calls():
     """Nessun comando che faccia partire flat o dark."""
     return not [c for c in CALLS
@@ -308,6 +314,6 @@ cyc("A9 richiesta stantia con flat in corso",
 assert not CANC.exists(), "richiesta consumata comunque"
 assert state["flat_stage"] == "running", state["flat_stage"]
 assert msg_has("ignorata") and msg_has("running"), MSGS
-assert msg_has("in corso: posa 12/30"), MSGS   # i flat proseguono davvero
+assert msg_all("Flat H (gain 100) in corso", "12/30 pose"), MSGS   # i flat proseguono davvero
 
 print("\nTUTTI I TEST FLAT-STOP: OK")

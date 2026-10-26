@@ -8,6 +8,8 @@ operazioni su ASIAIR/KASA:
   - Status   : sistema on/off, tetto, VPN/KASA e — se il piano gira — soggetto,
                frame fatti/mancanti, RMS totale medio della sessione e
                dell'ultimo frame (dal sink guida JSONL scritto da sfro_mqtt).
+               Nella notte nautica e' un riquadro «vivo»: riscritto al suo
+               posto ogni 9' fino all'alba nautica (2026-10-20).
   - Start    : (conferma Si'/No) KASA on -> attesa boot -> connect_all con
                priming. Cooler e anti-dew restano SPENTI (garanzia esplicita).
                Cancella il marker di shutdown manuale.
@@ -148,6 +150,13 @@ class SfroBot:
         self.op_lock = threading.Lock()   # una sola operazione mutante alla volta
         self.op_name = None
         self.pending = {}                 # message_id -> (azione, ts) da confermare
+        # Status «vivo» (2026-10-20): UN solo riquadro aggiornato alla volta;
+        # il file serve a riprenderlo dopo un riavvio del bot
+        self.live_every_s = 60 * float(bc.get("status_live_minutes", 9))
+        self.live_file = Path(bc.get("status_live_file",
+                                     "/var/lib/sfro-agent/status_live.json"))
+        self.live_lock = threading.Lock()
+        self.live = None                  # {mid, until, body, ev}
         # terminal_uuid Kasa: riusa quello dell'agente se leggibile
         try:
             st = json.loads(Path(cfg.get("state_file", "")).read_text())
@@ -190,6 +199,7 @@ class SfroBot:
     def run(self):
         self.api("setMyCommands",
                  commands=[{"command": "sfro", "description": "Menù osservatorio SFRO"}])
+        self.live_resume()
         while True:
             d = self.api("getUpdates", offset=self.offset, timeout=self.poll_timeout,
                          allowed_updates=["message", "callback_query"])
@@ -368,11 +378,151 @@ class SfroBot:
         return out
 
     # ---------------- Status ----------------
+    # RIQUADRO «VIVO» (richiesta utente 2026-10-20: meno messaggi su Telegram).
+    # Nella notte nautica lo Status non e' piu' una fotografia: il messaggio si
+    # riscrive al suo posto ogni status_live_minutes (9', come il sync) fino
+    # all'alba nautica, e le modifiche non suonano sul telefono. Un nuovo Status
+    # prende il posto del precedente, che resta fermo con una nota. Fuori dalla
+    # notte resta il messaggio singolo.
+    def night(self):
+        return A.nautical_window(datetime.now(self.tz), self.cfg["location"],
+                                 self.tz, self.cfg.get("nautical", {}).get(
+                                     "depression", 12))
+
     def do_status(self, th):
+        in_n, _, n_end, _ = self.night()
+        until = n_end if in_n else None
+        body = self.status_body(until)
+        if not until:
+            self.send(body, thread=th)
+            return
+        mid = self.send(f"{body}\n{self.live_footer(until)}", thread=th)
+        if mid:
+            self.live_start(mid, until, body)
+
+    def live_footer(self, until, stato="vivo") -> str:
+        if stato == "vivo":
+            return (f"🔄 Si aggiorna qui ogni {self.live_every_s / 60:g}' fino "
+                    f"all'alba nautica ({until:%H:%M} TX)")
+        if stato == "fine":
+            return f"⏹️ Aggiornamenti finiti: alba nautica delle {until:%H:%M} TX"
+        return "⏹️ Non più aggiornato: vedi lo Status più recente"
+
+    def live_save(self):
+        try:
+            if self.live:
+                self.live_file.write_text(json.dumps(
+                    {"mid": self.live["mid"], "body": self.live["body"],
+                     "until": self.live["until"].isoformat()}))
+            else:
+                self.live_file.unlink(missing_ok=True)
+        except Exception as e:
+            log.warning("status vivo: file %s: %s", self.live_file, e)
+
+    def live_start(self, mid, until, body):
+        """Rende «vivo» il riquadro `mid`; ferma (con la nota) quello di prima."""
+        ev = threading.Event()
+        with self.live_lock:
+            old = self.live
+            self.live = {"mid": mid, "until": until, "body": body, "ev": ev}
+            self.live_save()
+            if old:
+                old["ev"].set()
+                if old["mid"] != mid:
+                    self.live_edit(old["mid"], f"{old['body']}\n"
+                                   + self.live_footer(old["until"], "sostituito"))
+        threading.Thread(target=self.live_loop, args=(ev,), daemon=True).start()
+
+    def live_resume(self):
+        """Dopo un riavvio del bot riprende il riquadro rimasto vivo; se
+        l'alba e' gia' passata lo chiude con l'ultimo stato che mostrava."""
+        try:
+            d = json.loads(self.live_file.read_text())
+            until = datetime.fromisoformat(d["until"])
+            mid, body = d["mid"], d["body"]
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            log.warning("status vivo: file illeggibile (%s), lo ignoro", e)
+            self.live_file.unlink(missing_ok=True)
+            return
+        if datetime.now(self.tz) >= until:
+            self.live_edit(mid, f"{body}\n{self.live_footer(until, 'fine')}")
+            self.live_file.unlink(missing_ok=True)
+            return
+        log.info("status vivo: riprendo il messaggio %s fino alle %s",
+                 mid, f"{until:%H:%M}")
+        self.live_start(mid, until, body)
+
+    def live_edit(self, mid, text) -> str:
+        """'ok' | 'sparito' (messaggio cancellato in chat: si smette) |
+        'riprova' (rete, Telegram giu': si ritenta al giro dopo)."""
+        d = self.api("editMessageText", chat_id=self.chat_id, message_id=mid,
+                     text=text)
+        if d.get("ok"):
+            return "ok"
+        desc = str(d.get("description") or "")
+        if "not modified" in desc:
+            return "ok"
+        if "not found" in desc or "can't be edited" in desc:
+            return "sparito"
+        return "riprova"
+
+    def live_loop(self, ev):
+        while True:
+            with self.live_lock:
+                cur = self.live
+            if not cur or cur["ev"] is not ev:
+                return
+            until = cur["until"]
+            left = (until - datetime.now(self.tz)).total_seconds()
+            if ev.wait(max(0.0, min(self.live_every_s, left))):
+                return                         # sostituito da un nuovo Status
+            fine = datetime.now(self.tz) >= until
+            try:
+                body = self.status_body(None if fine else until)
+            except Exception as e:
+                log.warning("status vivo: lettura stato fallita: %s", e)
+                if not fine:
+                    continue
+                body = cur["body"]             # all'alba chiude comunque
+            with self.live_lock:
+                if ev.is_set():
+                    return                     # sostituito mentre leggevo
+                esito = self.live_edit(cur["mid"], f"{body}\n" + self.live_footer(
+                    until, "fine" if fine else "vivo"))
+                if esito == "ok":
+                    cur["body"] = body
+                    self.live_save()
+                if fine or esito == "sparito":
+                    self.live = None
+                    self.live_save()
+                    return
+
+    @staticmethod
+    def asiair_mode(ses: dict, st: dict) -> str:
+        """Stato dell'ASIAIR in una parola, come l'app: Plan / Autorun / Pause.
+        Stessa distinzione dell'agente (2026-07-24): cattura SENZA piano =
+        autorun manuale; piano interrotto dal tetto chiuso = pausa meteo."""
+        plan, cap = bool(ses.get("plan_started")), bool(ses.get("capturing"))
+        if st.get("weather_closed") and not cap:
+            return "Pause (tetto chiuso)"
+        if cap and not plan:
+            return "Autorun"
+        if plan and "pause" in str(ses.get("capture_state") or "").lower():
+            return "Pause"
+        if plan:
+            return "Plan"
+        return "nessuna attività"
+
+    def status_body(self, until=None) -> str:
+        """Testo dello Status. `until` = alba nautica se il riquadro e' vivo
+        (serve all'avviso «fine prevista oltre l'alba»)."""
         d = self.diagnose()
         roof = A.parse_alpaca(A.http_get_json(
             A.alpaca_issafe_url(self.cfg["roof"]), self.http_cfg))
-        lines = [f"📊 Stato SFRO — {datetime.now(self.tz).strftime('%H:%M')} TX",
+        now = datetime.now(self.tz)
+        lines = [f"📊 Stato SFRO — ultimo aggiornamento {now:%H:%M} TX",
                  {"OPEN": "🏠 Tetto: APERTO",
                   "CLOSED": "🏠 Tetto: CHIUSO"}.get(roof, "🏠 Tetto: SCONOSCIUTO"),
                  "🌐 VPN: " + {True: "OK", False: "GIÙ", None: "n/d"}[d["vpn_up"]]]
@@ -384,33 +534,46 @@ class SfroBot:
             on = d["plug"] == "ON" or d["asiair_ping"]
             lines.append("🟡 Sistema ACCESO ma ASIAIR non operativo." if on
                          else "💤 Sistema SPENTO.")
-            lines += errs
-            self.send("\n".join(lines), thread=th)
-            return
-        lines.append("🟢 Sistema ACCESO, ASIAIR operativo.")
-        if errs:                      # es. KASA cloud giu' con rig acceso
-            lines += errs
+            return "\n".join(lines + errs)
         # telemetria: riusa sfro_mqtt.slow_payloads (sola lettura, stessi campi HA)
         try:
             import sfro_mqtt as M
             data = M.Publisher(self.cfg, dry=True).slow_payloads()
         except Exception as e:
             data = {}
-            lines.append(f"⚠️ Telemetria non leggibile: {e}")
+            errs = errs + [f"⚠️ Telemetria non leggibile: {e}"]
         ses = data.get("session") or {}
+        try:
+            st = json.loads(self.state_file.read_text())
+        except Exception:
+            st = {}
+        mode = self.asiair_mode(ses, st) if ses else "acceso (stato n/d)"
+        lines.append(f"🟢 ASIAIR: {mode}")
+        lines += errs                 # es. KASA cloud giu' con rig acceso
         if ses.get("plan_started") or ses.get("capturing"):
             done, total = ses.get("frame_done"), ses.get("frame_total")
-            lines.append(f"▶️ Piano «{ses.get('plan_name') or 'n/d'}» in corso")
+            if mode == "Autorun":
+                lines.append("▶️ Autorun in corso (avviato a mano)")
+            else:
+                lines.append(f"{'⏸️' if mode.startswith('Pause') else '▶️'} "
+                             f"Piano «{ses.get('plan_name') or 'n/d'}» "
+                             f"{'in pausa' if mode.startswith('Pause') else 'in corso'}")
             tgt = ses.get("target") or "n/d"
             lines.append(f"🎯 Soggetto: {tgt}"
                          + (f" · filtro {ses['filter']}" if ses.get("filter") else ""))
             if done is not None and total:
-                lines.append(f"📷 Riprese: {done}/{total} fatte, {total - done} mancanti"
-                             + (f" ({ses['exp_s']}s)" if ses.get("exp_s") else ""))
-            if ses.get("left_time_min"):
-                eta = (ses.get("eta") or "")[11:16]
-                lines.append(f"⏱️ Restano ~{ses['left_time_min']} min"
-                             + (f" (fine {eta})" if eta else ""))
+                pct = max(0, min(100, int(round(100 * done / total))))
+                n = int(round(pct / 10))
+                lines += [f"📷 Riprese: {'▓' * n}{'░' * (10 - n)} {pct}%",
+                          f"      {done}/{total} fatte · {total - done} mancanti"
+                          + (f" · pose da {ses['exp_s']:g}s" if ses.get("exp_s") else "")]
+            if ses.get("eta"):
+                eta = datetime.fromisoformat(ses["eta"])
+                riga = (f"⏱️ Fine prevista alle ore {eta.astimezone(self.tz):%H:%M} TX"
+                        f" · {eta.astimezone(A.TZ_IT):%H:%M} IT")
+                if until and eta > until:
+                    riga += f" (oltre l'alba nautica delle {until:%H:%M})"
+                lines.append(riga)
             rms_s, rms_f = self.guide_rms(ses.get("exp_s"))
 
             def _f(v):
@@ -422,7 +585,7 @@ class SfroBot:
             if cam.get("sensor_temp_c") is not None:
                 lines.append(f"🧊 Camera {cam['sensor_temp_c']}°C, "
                              f"cooler {'ON' if cam.get('cooler_on') else 'OFF'}")
-        self.send("\n".join(lines), thread=th)
+        return "\n".join(lines)
 
     def guide_rms(self, exp_s=None, win=120.0):
         """(rms medio sessione, rms ultimo frame) in arcsec dal sink JSONL di

@@ -163,6 +163,12 @@ def msg_has(frag):
     return any(frag in m for m in MSGS)
 
 
+def msg_all(*frags):
+    """Un solo messaggio con tutti i frammenti: il riquadro «vivo» (2026-10-20)
+    tiene in testa la riga di avvio del gruppo e sotto l'avanzamento."""
+    return any(all(f in m for f in frags) for m in MSGS)
+
+
 # N1: ripresa, poi alba -> teardown + drying
 cyc("N1a ripresa", in_night=True, snap=snap(started=True))
 assert state.get("imaging_active")
@@ -191,14 +197,15 @@ assert state.get("flat_groups") == [[100, 75, [4, 5], "H+S"],
                                     [0, 67, [2], "G"]], state.get("flat_groups")
 assert state.get("flat_stage") == "running"
 
-# N2b: autorun in corso -> messaggio di avanzamento (mai silente, 2026-07-24)
+# N2b: autorun in corso -> avanzamento (mai silente, 2026-07-24), dal
+# 2026-10-20 riscritto nel riquadro «vivo» del gruppo
 cyc("N2b avanzamento", flats_status=(True, True, 250, "12/30", ""))
-assert msg_has("Flat H+S (gain 100) in corso: posa 12/30, ~5 min residui"), MSGS
+assert msg_all("per H+S (gain 100)", "12/30 pose · ~5 min residui"), MSGS
 assert not CALLS, CALLS
 
 # N3: gruppo finito -> tempi auto letti, parte L @ gain 100 al 50%
 cyc("N3 -> gruppo (100,50)", flats_status=(True, False, 0, None, ""))
-assert msg_has("Flat H+S (gain 100) completati"), MSGS
+assert msg_all("per H+S (gain 100)", "completati in ~"), MSGS
 assert msg_has("Tempi auto: S 2.5s · H 3.1s"), MSGS
 assert state["flat_times"] == {"4:100": 2.5, "5:100": 3.1}, state["flat_times"]
 assert "gain(100)" in CALLS and "brightness(50)" in CALLS, CALLS
@@ -206,14 +213,14 @@ assert msg_has("per L (gain 100)"), MSGS
 
 # N4: -> gruppo G @ gain 0 al 67% (RGB a gain 0: tetto ~15s, 2026-07-26)
 cyc("N4 -> gruppo (0,67)", flats_status=(True, False, 0, None, ""))
-assert msg_has("Flat L (gain 100) completati"), MSGS
+assert msg_all("per L (gain 100)", "completati in ~"), MSGS
 assert "gain(0)" in CALLS and "brightness(67)" in CALLS, CALLS
 assert msg_has("per G (gain 0)"), MSGS
 assert state["flat_times"]["0:100"] == 1.6
 
 # N5: ultimo gruppo flat finito -> pannello 5, DARK gain 100 (H+L+S) con exp dei flat
 cyc("N5 -> dark gain 100", flats_status=(True, False, 0, None, ""))
-assert msg_has("Flat G (gain 0) completati"), MSGS
+assert msg_all("per G (gain 0)", "completati in ~"), MSGS
 assert "brightness(5)" in CALLS, CALLS
 assert "gain(100)" in CALLS, CALLS
 assert "slots(dark,[0, 4, 5],exp={0: 1.6, 4: 2.5, 5: 3.1})" in CALLS, CALLS
@@ -224,7 +231,7 @@ assert state["flat_times"]["2:0"] == 2.2
 
 # N6: dark 100 finiti -> dark gain 0 (G) con exp del suo flat
 cyc("N6 -> dark gain 0", flats_status=(True, False, 0, None, ""))
-assert msg_has("Dark flat H+L+S (gain 100) completati"), MSGS
+assert msg_all("Dark flat H+L+S (gain 100)", "completati in ~"), MSGS
 assert "gain(0)" in CALLS, CALLS
 assert "slots(dark,[2],exp={2: 2.2})" in CALLS, CALLS
 assert msg_has("Dark flat G (gain 0) avviati"), MSGS
@@ -233,7 +240,7 @@ assert msg_has("Dark flat G (gain 0) avviati"), MSGS
 # shutdown, KASA off. L'ordine e' quello dal 2026-09-08: a frame finiti niente
 # resta acceso durante l'rsync, che dura minuti.
 cyc("N7 chiusura", flats_status=(True, False, 0, None, ""))
-assert msg_has("Dark flat G (gain 0) completati"), MSGS
+assert msg_all("Dark flat G (gain 0)", "completati in ~"), MSGS
 assert "sync" in CALLS and "set_output(dew_heater,5)" in CALLS, CALLS
 assert "cooler_off" in CALLS, CALLS
 i_cool, i_heat, i_sync, i_shut = (CALLS.index("cooler_off"),

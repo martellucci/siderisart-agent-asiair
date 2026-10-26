@@ -778,6 +778,12 @@ class AsiairControl:
                 ep, _ = c.call("get_enabled_plan", [], max_wait=self.timeout)
                 eplans = ep.get("result") or []
                 info["plan_started"] = any(p.get("is_plan_started") for p in eplans)
+                # rotatore CAA (2026-10-25), solo se richiesto; per ULTIMO: un
+                # suo guasto non deve costare le letture qui sopra
+                if "caa" in self.required_devices:
+                    cr, _ = c.call("get_caa_state", [], max_wait=self.timeout)
+                    info["caa_connected"] = (cr.get("code") == 0 and (cr.get("result") or {})
+                                             .get("state") in ("idle", "moving"))
         except Exception as e:
             log.info("ASIAIR non raggiungibile/illeggibile: %s", e)
         # stato mount + posizione sul canale guider (4400)
@@ -801,9 +807,9 @@ class AsiairControl:
 
     _DEV_KEY = {"camera": "cam_open", "focuser": "focuser_connected",
                 "wheel": "wheel_connected", "mount": "mount_connected",
-                "guide": "guide_connected"}
+                "guide": "guide_connected", "caa": "caa_connected"}
     _DEV_LABEL = {"camera": "camera", "focuser": "EAF", "wheel": "EFW",
-                  "mount": "mount", "guide": "guida"}
+                  "mount": "mount", "guide": "guida", "caa": "CAA"}
 
     def missing_devices(self, snap: dict) -> list:
         """Etichette dei device richiesti NON connessi (per i messaggi di attesa)."""
@@ -1290,6 +1296,88 @@ class AsiairControl:
                 out[s["filter"]] = float(s.get("exp") or 0)
         return out if len(out) == len(set(filter_idxs)) else None
 
+    def caa_open(self) -> bool:
+        """True se il CAA e' APERTO (state idle/moving da get_caa_state). Da
+        chiuso EAF e EFW danno 'close'; per il CAA si accettano solo i due stati
+        visti da aperto, cosi' un valore nuovo non passa per connesso."""
+        code, res = self._call1(self.port, "get_caa_state")
+        return (code == 0 and isinstance(res, dict)
+                and res.get("state") in ("idle", "moving"))
+
+    def caa_info(self):
+        """Stato del rotatore ZWO CAA (get_caa_info, canale 4700 — ASIAIR v3,
+        verificato live 2026-10-24). Ritorna None se illeggibile, altrimenti
+        {connected, state, mech, sky, home, reverse, lo, hi}: mech = posizione
+        meccanica, sky = angolo della camera in cielo (lo stesso che l'ASIAIR
+        scrive nei nomi dei FITS), [lo, hi] = campo meccanico consentito."""
+        code, d = self._call1(self.port, "get_caa_info")
+        if code != 0 or not isinstance(d, dict):
+            return None
+        try:
+            st = d.get("angle_status") or {}
+            rng = [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?",
+                                                 st.get("expected_range") or "")]
+            # 'connected' dell'ASIAIR e' l'ELENCO dei CAA (id/nome), non lo stato
+            # di apertura: aperto = state idle/moving (2026-10-25)
+            cstate = (d.get("state") or {}).get("state")
+            return {"connected": cstate in ("idle", "moving"),
+                    "state": cstate,
+                    "mech": float(st.get("mechanical_angle")),
+                    "sky": float((d.get("solve_angle") or {}).get("current_angle")),
+                    "home": float(d.get("home_solve_angle")),
+                    "reverse": bool(st.get("reverse", True)),
+                    "lo": rng[0] if len(rng) == 2 else 180.0,
+                    "hi": rng[1] if len(rng) == 2 else 360.0}
+        except (TypeError, ValueError):
+            return None
+
+    def caa_rotate(self, mech: float, tol: float = 2.0, max_s: float = 120) -> tuple:
+        """Porta il CAA alla posizione MECCANICA `mech` (flat all'angolo di
+        ripresa, 2026-10-24). L'ASIAIR vuole l'angolo IN CIELO: move_caa [sky]
+        (catturato dall'app), convertito qui con la calibrazione home letta al
+        momento. Regole dalla prova live del 24/10:
+        - move_caa risponde code 0 SUBITO, l'arrivo si aspetta leggendo;
+        - 'idle' compare ~0.5 s prima della fine vera: arrivato = idle E angolo
+          in cielo uguale a quello chiesto;
+        - un comando appena dopo un movimento -> code 268 (occupato): si
+          riprova dopo 2 s.
+        Verifica finale sulla posizione meccanica entro `tol`. (ok, detail)."""
+        info = self.caa_info()
+        if not info:
+            return False, "rotatore CAA non leggibile (get_caa_info)"
+        if not info["connected"]:
+            return False, "rotatore CAA non connesso all'ASIAIR"
+        if not info["lo"] < mech <= info["hi"]:
+            return False, (f"posizione {mech:.1f}° fuori dal campo consentito "
+                           f"({info['lo']:g}-{info['hi']:g}°)")
+        if abs(info["mech"] - mech) <= 0.5:
+            return True, f"già a {info['mech']:.1f}° (cielo {info['sky']:.1f}°)"
+        sky = round(caa_mech_to_sky(mech, info["home"], info["reverse"]), 1)
+        code = None
+        for _ in range(6):
+            code, det = self._call1(self.port, "move_caa", [sky])
+            if code != 268:
+                break
+            time.sleep(2)
+        if code != 0:
+            return False, f"move_caa [{sky}] code {code} ({det})"
+        t0 = time.time()
+        while True:
+            time.sleep(0.5)
+            now = self.caa_info()
+            if (now and now["state"] == "idle"
+                    and abs(angle_diff(now["sky"], sky)) <= 0.3):
+                break
+            if time.time() - t0 > max_s:
+                return False, (f"rotazione non conclusa in {int(max_s)} s "
+                               f"(ultima lettura: {now and round(now['mech'], 1)}°)")
+        time.sleep(1)
+        fin = self.caa_info() or now
+        if abs(fin["mech"] - mech) > tol:
+            return False, (f"arrivato a {fin['mech']:.1f}° invece di {mech:.1f}° "
+                           f"(tolleranza {tol:g}°)")
+        return True, f"ruotato a {fin['mech']:.1f}° (cielo {fin['sky']:.1f}°)"
+
     def start_flats(self) -> tuple:
         """Avvia l'autorun FLAT gia' programmato dall'utente (cattura app 2026-07-03):
         reset_sequence_progress [] + start_exposure ["light"] (stesso comando dei
@@ -1534,6 +1622,20 @@ class AsiairControl:
                          lambda: self._call1(self.port, "open_wheel", [0]), 60):
                 return False, "EFW non connesso"
 
+            # 2b) rotatore CAA (2026-10-25): la notte 24-25/10 l'avvio T-10 non
+            # lo apriva e il CAA e' rimasto chiuso. Ricetta v3 (flusso di terzi
+            # visto sul forum SFRO): `open_caa [id]` se chiuso, poi state idle.
+            # L'id viene da get_caa_info.connected; se la lista e' vuota (da
+            # chiuso potrebbe esserlo) si prova lo 0, come per le camere.
+            if "caa" in self.required_devices:
+                _, ci = self._call1(self.port, "get_caa_info")
+                lst = ci.get("connected") if isinstance(ci, dict) else None
+                id_caa = (lst[0].get("id", 0) if isinstance(lst, list) and lst
+                          and isinstance(lst[0], dict) else 0)
+                if not _wait("caa", self.caa_open,
+                             lambda: self._call1(self.port, "open_caa", [id_caa]), 60):
+                    return False, "CAA (rotatore) non connesso"
+
             # 3) mount (4400): select SOLO da scollegato (312 se gia' connesso)
             def _mount_ok():
                 code, res = self._call1(self.guider_port, "get_connected", [True])
@@ -1635,7 +1737,7 @@ class AsiairControl:
                 return False, "camera guida non connessa"
 
             det = ", ".join(f"{k} {v:.0f}s" for k, v in times.items())
-            return True, (f"5/5 device in {time.time()-t0:.0f}s ({det}); "
+            return True, (f"{len(times)} device in {time.time()-t0:.0f}s ({det}); "
                           f"{clock_det}; ora+location al mount OK")
         except Exception as e:
             return False, str(e)
@@ -1874,6 +1976,13 @@ def _dur(sec: float) -> str:
     return f"{m}'" if m < 60 else f"{m // 60} h {m % 60:02d}'"
 
 
+def _bar(pct: int) -> str:
+    """"▓▓▓▓▓░░░░░ 47%": la barra dei messaggi «vivi» (sync, flat/dark)."""
+    pct = max(0, min(100, int(round(pct))))
+    n = int(round(pct / 10))
+    return f"{'▓' * n}{'░' * (10 - n)} {pct}%"
+
+
 def sync_live_text(cosa: str, stato: str, r: dict, elapsed_s: float,
                    t0: datetime, now: datetime, cap_min: int) -> str:
     """Testo del messaggio «vivo». r = risultato (anche parziale) di
@@ -1888,10 +1997,7 @@ def sync_live_text(cosa: str, stato: str, r: dict, elapsed_s: float,
         righe.append("niente da copiare: il NAS è già allineato")
     else:
         pct = (100 * cb / tb) if tb else (100 * cf / tf)
-        pct = max(0, min(100, int(round(pct))))
-        n = int(round(pct / 10))
-        righe += [f"{'▓' * n}{'░' * (10 - n)} {pct}%",
-                  f"{cf}/{tf} file · {_vol(cb, tb)}"]
+        righe += [_bar(pct), f"{cf}/{tf} file · {_vol(cb, tb)}"]
     riga = f"dalle {t0:%H:%M} ({_dur(elapsed_s)})"
     if cb > 0 and elapsed_s >= 60:     # velocita' e stima solo dopo 1 minuto
         riga += f" · {_num(cb / elapsed_s / 1e6)} MB/s"
@@ -1902,6 +2008,116 @@ def sync_live_text(cosa: str, stato: str, r: dict, elapsed_s: float,
             if eta > limite:
                 riga += f" (oltre il limite delle {limite:%H:%M})"
     righe += [riga, f"agg. {now:%H:%M}"]
+    return "\n".join(righe)
+
+
+# --------------------------------------------------------------------------- #
+# Rotatore ZWO CAA (2026-10-24): angolo in cielo <-> posizione meccanica.
+# Misure live del 24/10 (reverse=true, home 52.4): meccanico 319.4 = cielo
+# 11.8, meccanico 309.6 = cielo 2.0  ->  cielo = (home + meccanico) mod 360.
+# Il campo meccanico consentito dall'ASIAIR e' MEZZO giro (180,360]: ogni
+# angolo in cielo cade su UNA sola posizione, e i due lati del meridian flip
+# (12° e 192° in cielo, stesso rotatore fermo) danno la stessa posizione.
+# --------------------------------------------------------------------------- #
+def angle_diff(a: float, b: float, period: float = 360.0) -> float:
+    """Differenza a-b ridotta a (-period/2, period/2]."""
+    d = (a - b) % period
+    return d - period if d > period / 2 else d
+
+
+def caa_mech_to_sky(mech: float, home: float, reverse: bool = True) -> float:
+    return (home + mech) % 360 if reverse else (home - mech) % 360
+
+
+def caa_sky_to_mech(sky: float, home: float, reverse: bool = True,
+                    lo: float = 180.0) -> float:
+    """Posizione meccanica nel campo (lo, lo+180] che da' quell'angolo in
+    cielo, a meno del mezzo giro del meridian flip."""
+    m = (sky - home) % 360 if reverse else (home - sky) % 360
+    while m <= lo:
+        m += 180
+    while m > lo + 180:
+        m -= 180
+    return round(m, 1)
+
+
+def caa_clusters(counts: dict, tol: float = 2.0) -> dict:
+    """{posizione: n_light} -> {posizione: rappresentante}. Posizioni vicine
+    (salti di al piu' `tol`, ampiezza al piu' 2*tol) sono lo STESSO angolo
+    (scelta utente 2026-10-24: 42° e 43° uguali); il rappresentante e' la
+    posizione con piu' light."""
+    out, grp = {}, []
+
+    def chiudi():
+        if grp:
+            rep = max(grp, key=lambda m: (counts[m], -m))
+            for m in grp:
+                out[m] = rep
+    for m in sorted(counts):
+        if grp and (m - grp[-1] > tol or m - grp[0] > 2 * tol):
+            chiudi()
+            grp = []
+        grp.append(m)
+    chiudi()
+    return out
+
+
+# FLAT/DARK: riquadro «vivo» (richiesta utente 2026-10-20, meno messaggi): la
+# riga di avvio di ogni gruppo resta in testa e sotto si riscrivono barra,
+# pose e ora a ogni ciclo dell'agente (3'), al posto dei vecchi "⏳ ... in
+# corso" uno per ciclo. Formato scelto dall'utente:
+#   🌑 Dark flat L+O (gain 100) avviati (2 slot dark, 60 frame, ~9 min). ...
+#   ▓▓▓▓▓░░░░░ 55%
+#   33/60 pose · ~5 min residui
+#   Aggiornamento: 14:21
+# --------------------------------------------------------------------------- #
+def flat_live_text(head: str, stato: str, prog: str = None, left_s: float = None,
+                   now: datetime = None, run_s: float = None,
+                   extra: str = None) -> str:
+    """stato: 'in corso' | 'completati' | 'interrotti'. prog = 'fatte/totali'
+    di flats_status (None se non letto: niente barra). extra = riga in piu'
+    a gruppo completato (i tempi auto dei flat): dal 2026-10-20 la fine del
+    gruppo sta SOLO nel riquadro, niente piu' messaggio ✅ separato."""
+    done = tot = None
+    try:
+        done, tot = (int(x) for x in str(prog).split("/"))
+    except (TypeError, ValueError):
+        pass
+    righe = [head]
+    if stato == "completati":
+        righe += [_bar(100), (f"{tot}/{tot} pose · " if tot else "")
+                  + f"completati in ~{int((run_s or 0) / 60)} min ✅"]
+        if extra:
+            righe.append(extra)
+    elif stato == "interrotti":
+        righe.append((f"{done}/{tot} pose · " if tot else "") + "INTERROTTI ⛔")
+    else:
+        rem = (f"~{max(1, int((left_s + 59) // 60))} min residui"
+               if left_s else None)
+        if tot:
+            righe += [_bar(100 * done / tot),
+                      f"{done}/{tot} pose" + (f" · {rem}" if rem else "")]
+        else:
+            righe += [_bar(0), rem or "in avvio…"]
+    righe.append(f"Aggiornamento: {(now or datetime.now(TZ_IT)):%H:%M}")
+    return "\n".join(righe)
+
+
+def dry_live_text(tot_min: float, left_s: float, stato: str = "in corso",
+                  now: datetime = None) -> str:
+    """Riquadro «vivo» dell'attesa di asciugatura prima dei flat (richiesta
+    utente 2026-10-20): al posto di un "⏳ Attesa Flats -N minuti" per ciclo.
+    stato: 'in corso' | 'finita' | 'interrotta'."""
+    righe = [f"⏳ Attesa Flats — asciugatura {tot_min:g} min"]
+    if stato == "finita":
+        righe += [_bar(100), "asciugatura finita ✅"]
+    elif stato == "interrotta":
+        righe.append("INTERROTTA 🛑")
+    else:
+        tot_s = tot_min * 60
+        righe += [_bar(100 * (1 - left_s / tot_s) if tot_s else 100),
+                  f"-{max(1, int((left_s + 59) // 60))} minuti"]
+    righe.append(f"Aggiornamento: {(now or datetime.now(TZ_IT)):%H:%M}")
     return "\n".join(righe)
 
 
@@ -2624,6 +2840,29 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         except (TypeError, ValueError):
             return float(ff.get("dry_wait_minutes", 20))
 
+    def dry_live(left_s, stato="in corso"):
+        """Riquadro «vivo» dell'asciugatura (2026-10-20): aperto al primo
+        avviso, poi modificato al suo posto a ogni ciclo e chiuso a fine
+        attesa. Chiusura "interrotta" senza ripiego su un messaggio nuovo:
+        lo stop lo annuncia gia' il suo messaggio."""
+        lv = state.get("flat_wait_live") or {}
+        text = dry_live_text(dry_wait_min(), left_s, stato,
+                             now.astimezone(TZ_IT))
+        if stato != "in corso":
+            state.pop("flat_wait_live", None)
+            if not lv:
+                return
+        if dry_run:
+            log.info("[dry-run TG edit] %s", text)
+            return
+        if lv.get("mid") and tg.edit(lv["mid"], text):
+            return
+        if stato == "interrotta":
+            return
+        mid = notify(text)
+        if stato == "in corso":
+            state["flat_wait_live"] = {"mid": mid}
+
     # Marker di SHUTDOWN MANUALE (bot Telegram /sfro): se lo shutdown e' avvenuto
     # DOPO l'inizio della notte corrente, l'agente NON riaccende il rig per il
     # resto della notte (lo Start manuale dal bot cancella il marker). Uno
@@ -2841,7 +3080,8 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 rem_s = (dry_wait_min() * 60
                          - (datetime.now(tz) - now).total_seconds())
                 rem_m = max(1, int((rem_s + 59) // 60))
-                notify(f"⏳ Attesa Flats -{rem_m} minuti")
+                state.pop("flat_wait_live", None)
+                dry_live(rem_s)
                 state["flat_wait_notified"] = rem_m
             else:
                 state["flat_stage"] = "error"
@@ -2956,7 +3196,39 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             state["flat_stage"] = "error"
             state["flat_error"] = f"{now.isoformat()} {msg}"
             log.error("Flusso flat: %s", msg)
+            live_close("interrotti")
+            if state.get("flat_wait_live"):
+                dry_live(0, "interrotta")
             notify(f"⛔ {msg}\nFlusso flat INTERROTTO: rig lasciato acceso, intervieni tu.")
+
+        def live_open(head):
+            """Apre il riquadro «vivo» di un gruppo flat/dark (2026-10-20)."""
+            mid = notify(flat_live_text(head, "in corso",
+                                        now=now.astimezone(TZ_IT)))
+            state["flat_live"] = {"mid": mid, "head": head}
+
+        def live_show(stato, prog=None, left=None, run_s=None, extra=None):
+            """Riscrive il riquadro al suo posto (nessuna notifica sul
+            telefono); se la modifica non riesce, messaggio nuovo che diventa
+            quello da modificare (come SyncLive)."""
+            lv = state.get("flat_live")
+            if not lv:
+                return
+            text = flat_live_text(lv["head"], stato, prog, left,
+                                  now.astimezone(TZ_IT), run_s, extra)
+            if dry_run:
+                log.info("[dry-run TG edit] %s", text)
+                return
+            if lv.get("mid") and tg.edit(lv["mid"], text):
+                return
+            mid = notify(text)
+            if mid:
+                lv["mid"] = mid
+
+        def live_close(stato, prog=None, run_s=None, extra=None):
+            if state.get("flat_live"):
+                live_show(stato, prog, None, run_s, extra)
+                state.pop("flat_live", None)
 
         def _session_filter_triples():
             """Triple (indice EFW, lettera, gain) dei LIGHT di stanotte (dal DB
@@ -2978,6 +3250,48 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             return ([(names.index(l), l, g) for l, g in pairs],
                     "+".join(sorted({l for l, _ in pairs})))
 
+        def _session_rotator_positions():
+            """{(lettera, gain): [posizioni meccaniche]} per i flat di
+            stanotte (rotatore CAA, 2026-10-24), piu' '_cur' (posizione
+            attuale) e '_sky' ({posizione: angolo in cielo da mostrare}).
+            Angoli dai NOMI dei light (angolo in cielo), convertiti con la
+            calibrazione letta ORA dal CAA; angoli vicini raggruppati entro la
+            tolleranza. Rotatore disattivato in config o light senza angolo
+            -> {} (flat senza rotazione, come prima). (None, motivo) se
+            servirebbe il rotatore ma non si legge."""
+            rc = ff.get("rotator") or {}
+            if not rc.get("enabled"):
+                return {}, ""
+            try:
+                ang = SL.light_angles(cfg, state.get("night_id"))
+            except Exception as e:
+                return None, f"DB sessioni: {e}"
+            if not ang:
+                return {}, ""
+            info = ac.caa_info()
+            if not info or not info["connected"]:
+                return None, "rotatore CAA non leggibile o non connesso"
+            tol = float(rc.get("tolerance_deg", 2))
+            per_combo, counts, sky_n = {}, {}, {}
+            for combo, by_sky in ang.items():
+                for sky, n in by_sky.items():
+                    m = caa_sky_to_mech(sky, info["home"], info["reverse"], info["lo"])
+                    per_combo.setdefault(combo, set()).add(m)
+                    counts[m] = counts.get(m, 0) + n
+                    sky_n.setdefault(m, {})
+                    sky_n[m][sky] = sky_n[m].get(sky, 0) + n
+            rep = caa_clusters(counts, tol)
+            out = {c: sorted({rep[m] for m in ms}) for c, ms in per_combo.items()}
+            # angolo da mostrare = il valore in cielo piu' frequente del gruppo
+            tot = {}
+            for m, d in sky_n.items():
+                for sky, n in d.items():
+                    tot.setdefault(rep[m], {})
+                    tot[rep[m]][sky] = tot[rep[m]].get(sky, 0) + n
+            out["_sky"] = {r: f"{max(d, key=d.get):g}" for r, d in tot.items()}
+            out["_cur"] = info["mech"]
+            return out, ""
+
         def _start_flat_group():
             """Configura e avvia l'autorun flat del PRIMO gruppo in
             state['flat_groups'] = [gain, pct, idxs, lbl]: stesso GAIN camera
@@ -2985,7 +3299,18 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             e stessa luminosita' pannello. Tempo di posa AUTO: lo calcola
             l'ASIAIR e lo scrive nel campo exp dello slot (verificato live
             2026-07-24). Errori -> fail()."""
-            gain, pct, idxs, lbl = state["flat_groups"][0]
+            grp = state["flat_groups"][0]
+            gain, pct, idxs, lbl = grp[:4]
+            mech = grp[4] if len(grp) > 4 else None     # gruppi pre-rotatore
+            ang = f" · angolo {grp[5]}°" if mech is not None else ""
+            if mech is not None:
+                # rotatore all'angolo di ripresa PRIMA di tutto (2026-10-24)
+                tol = float((ff.get("rotator") or {}).get("tolerance_deg", 2))
+                ok_r, det_r = ac.caa_rotate(mech, tol)
+                if not ok_r:
+                    return fail(f"rotatore non portato all'angolo {grp[5]}° "
+                                f"per i flat {lbl} ({det_r}).")
+                log.info("Flusso flat: rotatore %s", det_r)
             ok_g, det_g = ac.set_camera_gain(gain)
             if not ok_g:
                 return fail(f"gain camera non impostato a {gain} ({det_g}).")
@@ -3001,8 +3326,8 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 return fail(f"autorun flat {lbl} NON avviato: {det_s}.")
             state["flat_stage"] = "running"
             state["flat_started_ts"] = now.isoformat()
-            notify(f"💡 Pannello al {pct}% per {lbl} (gain {gain}): "
-                   f"autorun flat avviato ({det_cfg}).")
+            live_open(f"💡 Pannello al {pct}% per {lbl} (gain {gain}){ang}: "
+                      f"autorun flat avviato ({det_cfg}).")
 
         def _start_dark_group():
             """Avvia i dark flat del PRIMO gruppo in state['dark_groups'] =
@@ -3034,8 +3359,8 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             lm = state.get("flat_letters") or {}
             ttxt = " · ".join(f"{lm.get(str(i), '?')} {e:g}s"
                               for i, e in sorted(exps.items()))
-            notify(f"🌑 Dark flat {lbl} (gain {gain}) avviati ({det_cfg}). "
-                   f"Pose: {ttxt}.")
+            live_open(f"🌑 Dark flat {lbl} (gain {gain}) avviati ({det_cfg}). "
+                      f"Pose: {ttxt}.")
 
         def ask_shutdown(again=False):
             """Domanda a bottoni di fine flusso MANUALE: spengo o lascio acceso?
@@ -3092,13 +3417,16 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             closed = datetime.fromisoformat(state["flat_closed_ts"])
             left_s = dry_wait_min() * 60 - (now - closed).total_seconds()
             if left_s > 0:
-                # countdown "Attesa Flats -N minuti" ad ogni ciclo (5m); dedupe
-                # sul valore per non ripetere lo stesso -N su cicli ravvicinati
+                # countdown "Attesa Flats -N minuti" ad ogni ciclo, dal
+                # 2026-10-20 nel riquadro «vivo»; dedupe sul valore per non
+                # riscrivere lo stesso -N su cicli ravvicinati
                 rem_m = max(1, int((left_s + 59) // 60))
                 if rem_m != state.get("flat_wait_notified"):
-                    notify(f"⏳ Attesa Flats -{rem_m} minuti")
+                    dry_live(left_s)
                     state["flat_wait_notified"] = rem_m
                 return
+            if state.get("flat_wait_live"):
+                dry_live(0, "finita")
             if dry_run:
                 log.info("[dry-run] flat flow: pannello %s%% + avvio autorun",
                          ff.get("brightness", 85))
@@ -3150,6 +3478,12 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                     return fail(f"filtri di sessione non determinabili ({det_u}).")
                 bmap = ff.get("brightness_by_filter") or {}
                 bmap0 = ff.get("brightness_by_filter_gain0") or {}
+                # ROTATORE CAA (richiesta utente 2026-10-24): ogni (filtro,
+                # gain) va fatto all'angolo di ripresa di OGNI soggetto che
+                # l'ha usato -> una posizione del rotatore per angolo
+                rot, det_r = _session_rotator_positions()
+                if rot is None:
+                    return fail(f"angoli del rotatore non determinabili ({det_r}).")
                 groups = {}
                 for idx, letter, gain in triples:
                     pct = int(bmap.get(letter, ff.get("brightness", 85)))
@@ -3158,16 +3492,27 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                     # FALLIRE (2026-07-26: flat B mai partito). MAI 0%.
                     if gain == 0 and letter in bmap0:
                         pct = int(bmap0[letter])
-                    g = groups.setdefault((gain, pct), ([], []))
-                    g[0].append(idx)
-                    g[1].append(letter)
+                    for mech in rot.get((letter, gain)) or [None]:
+                        g = groups.setdefault((mech, gain, pct), ([], []))
+                        g[0].append(idx)
+                        g[1].append(letter)
                 state["flat_filters"] = sorted({i for i, _, _ in triples})
                 state["flat_letters"] = {str(i): l for i, l, _ in triples}
                 state["flat_times"] = {}
+                # ordine: prima i gruppi senza rotazione, poi le posizioni in
+                # un solo verso partendo dalla piu' vicina a quella attuale
+                mechs = sorted({m for m, _, _ in groups if m is not None})
+                cur = rot.get("_cur")
+                if mechs and cur is not None and abs(cur - mechs[-1]) < abs(cur - mechs[0]):
+                    mechs.reverse()
+                order = {None: -1, **{m: k for k, m in enumerate(mechs)}}
+                skyl = rot.get("_sky") or {}
                 state["flat_groups"] = [
                     [gain, pct, sorted(ix), "+".join(ls)]
-                    for (gain, pct), (ix, ls) in sorted(groups.items(),
-                                                        reverse=True)]
+                    + ([] if mech is None else [mech, skyl.get(mech)])
+                    for (mech, gain, pct), (ix, ls) in sorted(
+                        groups.items(),
+                        key=lambda kv: (order[kv[0][0]], -kv[0][1], -kv[0][2]))]
                 return _start_flat_group()
             # senza session_slots: un solo autorun con la luminosita' di default
             b = int(ff.get("brightness", 85))
@@ -3180,7 +3525,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 return fail(f"autorun flat NON avviato: {det}.")
             state["flat_stage"] = "running"
             state["flat_started_ts"] = now.isoformat()
-            notify(f"💡 Pannello al {b}%, autorun flat avviato.")
+            live_open(f"💡 Pannello al {b}%, autorun flat avviato.")
             return
 
         if stage in ("running", "darks"):
@@ -3203,25 +3548,30 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                          "controlla l'autorun sull'ASIAIR.")
                     return
                 # avanzamento ad ogni ciclo (richiesta utente 2026-07-24: mai
-                # silente durante flat/dark): gruppo corrente, posa, residuo
+                # silente durante flat/dark): dal 2026-10-20 nel riquadro
+                # «vivo» del gruppo, non piu' un messaggio per ciclo
                 cur = ""
                 if stage == "running" and state.get("flat_groups"):
                     g = state["flat_groups"][0]
                     cur = f" {g[3]} (gain {g[0]})"
+                    if len(g) > 4 and g[4] is not None:
+                        cur += f" · angolo {g[5]}°"
                 elif stage == "darks" and state.get("dark_groups"):
                     g = state["dark_groups"][0]
                     cur = f" {g[2]} (gain {g[0]})"
-                rem_m = max(1, int((left + 59) // 60))
-                notify(f"⏳ {label.capitalize()}{cur} in corso"
-                       + (f": posa {prog}" if prog else "")
-                       + f", ~{rem_m} min residui.")
+                if not state.get("flat_live"):
+                    # gruppo partito con una versione precedente (o riquadro
+                    # perso): se ne apre uno adesso
+                    state["flat_live"] = {
+                        "mid": None, "head": f"⏳ {label.capitalize()}{cur} in corso."}
+                live_show("in corso", prog, left)
                 return
             # cattura ferma: completata o interrotta a meta'?
             if left > 60:
                 return fail(f"autorun {label} FERMO con ~{int(left / 60)} min residui "
                             "(interrotto/errore).")
             if stage == "running" and state.get("flat_groups"):
-                grp = state["flat_groups"].pop(0)   # [gain, pct, idxs, lbl]
+                grp = state["flat_groups"].pop(0)   # [gain, pct, idxs, lbl, mech, angolo]
                 # tempi AUTO calcolati da ASIAIR: li scrive nel campo exp dello
                 # slot (verificato live 2026-07-24); servono ai dark flat
                 exps = ac.read_flat_exps(set(grp[2]))
@@ -3229,24 +3579,25 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                     return fail(f"tempi auto dei flat {grp[3]} non leggibili "
                                 "dagli slot: dark flat non configurabili.")
                 ft = state.setdefault("flat_times", {})
+                # chiave filtro:gain[:posizione rotatore]: lo stesso filtro a
+                # due angoli ha due tempi AUTO (2026-10-24)
+                mech = grp[4] if len(grp) > 4 else None
                 for i, e in exps.items():
-                    ft[f"{i}:{grp[0]}"] = e
+                    ft[f"{i}:{grp[0]}" + ("" if mech is None else f":{mech}")] = e
                 lm = state.get("flat_letters") or {}
                 ttxt = " · ".join(f"{lm.get(str(i), '?')} {e:g}s"
                                   for i, e in sorted(exps.items()))
-                notify(f"✅ Flat {grp[3]} (gain {grp[0]}) completati "
-                       f"(~{int(run_s / 60)} min). Tempi auto: {ttxt}.")
+                live_close("completati", prog, run_s, f"Tempi auto: {ttxt}")
                 if state["flat_groups"]:
                     # prossimo gruppo (altro gain e/o luminosita' pannello)
                     return _start_flat_group()
             elif stage == "darks" and state.get("dark_groups"):
                 grp = state["dark_groups"].pop(0)   # [gain, {idx: exp}, lbl]
-                notify(f"✅ Dark flat {grp[2]} (gain {grp[0]}) completati "
-                       f"(~{int(run_s / 60)} min).")
+                live_close("completati", prog, run_s)
                 if state["dark_groups"]:
                     return _start_dark_group()
             else:
-                notify(f"✅ {label.capitalize()} completati (~{int(run_s / 60)} min).")
+                live_close("completati", prog, run_s)
             if stage == "running":
                 ac.set_flat_brightness(int(ff.get("idle_brightness", 5)))  # chiuso e spento
                 if ff.get("session_slots", False) and ff.get("dark_flats", False):
@@ -3258,14 +3609,27 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                     if not ft:
                         return fail("tempi dei flat non in stato: "
                                     "dark flat non configurabili.")
+                    # tempi DISTINTI per (gain, filtro): con il rotatore lo
+                    # stesso filtro puo' avere un tempo per angolo (2026-10-24).
+                    # I dark non ruotano: tempi uguali al centesimo -> un solo
+                    # dark; tempi diversi -> un autorun dark in piu' per gain
+                    # (uno slot per filtro e per autorun)
                     by_gain = {}
                     for key, e in ft.items():
-                        i_s, g_s = key.split(":")
-                        by_gain.setdefault(int(g_s), {})[i_s] = float(e)
+                        i_s, g_s = key.split(":")[:2]
+                        ex = by_gain.setdefault(int(g_s), {}).setdefault(i_s, [])
+                        e = ac.round_exp(float(e))
+                        if e not in ex:
+                            ex.append(e)
                     lm = state.get("flat_letters") or {}
-                    state["dark_groups"] = [
-                        [g, m, "+".join(sorted(lm.get(i, "?") for i in m))]
-                        for g, m in sorted(by_gain.items(), reverse=True)]
+                    dg = []
+                    for g, per_f in sorted(by_gain.items(), reverse=True):
+                        for k in range(max(len(v) for v in per_f.values())):
+                            m = {i: sorted(v)[k] for i, v in per_f.items()
+                                 if len(v) > k}
+                            dg.append([g, m, "+".join(sorted(lm.get(i, "?")
+                                                             for i in m))])
+                    state["dark_groups"] = dg
                     return _start_dark_group()
             # RIG A RIPOSO **PRIMA** DEL SYNC (richiesta utente 2026-09-08).
             # Finiti flat e dark non c'e' piu' niente da riprendere, e il sync
@@ -3735,6 +4099,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         # flat" — restano spenti. Il piano non riparte: lo blocca teardown_done.
         state["flat_stage"] = "cancelled"
         state["flat_cancel_ts"] = now.isoformat()
+        dry_live(0, "interrotta")
         for k in ("flat_wait_notified", "flat_cool_ts", "flat_groups",
                   "dark_groups", "flat_ask_ts", "flat_ask_reminder_ts"):
             state.pop(k, None)
@@ -3840,7 +4205,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                   "plan_stopped_ts", "plan_completed", "session_finalized",
                   "plan_stall_left", "plan_stall_ts", "plan_stall_seen_ts",
                   "flat_stage", "flat_closed_ts", "flat_started_ts", "flat_error",
-                  "flat_filters", "flat_groups", "flat_wait_notified",
+                  "flat_live", "flat_wait_live", "flat_filters", "flat_groups", "flat_wait_notified",
                   "flat_letters", "flat_times", "dark_groups", "flat_cool_ts",
                   "flat_manual", "flat_ask_shutdown", "flat_ask_ts",
                   "flat_ask_reminder_ts", "flat_cancel_ts", "flat_sync_passes",

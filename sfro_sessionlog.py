@@ -29,6 +29,7 @@ import csv
 import json
 import math
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -425,6 +426,35 @@ def filters_gains_used(cfg: dict, night_id: str) -> list:
     finally:
         db.close()
     return sorted((r[0], int(r[1] or 0)) for r in rows if r[0])
+
+
+# angolo della camera IN CIELO nel nome ASIAIR: ..._20261024-120943_12deg_0.0C_...
+DEG = re.compile(r"_(-?\d+(?:\.\d+)?)deg_")
+
+
+def light_angles(cfg: dict, night_id: str) -> dict:
+    """{(filtro, gain): {angolo: n_light}} dei LIGHT della notte (2026-10-24,
+    rotatore CAA: i flat vanno fatti all'angolo di ripresa di ogni soggetto).
+    L'angolo e' quello del nome file (`_12deg_`, uguale all'header ROTATOR):
+    e' l'angolo IN CIELO dal plate solve, che al meridian flip salta di 180°
+    senza che il rotatore si muova -> la conversione in posizione meccanica la
+    fa l'agente. Nomi senza angolo -> nessuna voce per quel light."""
+    c = sl_cfg(cfg)
+    db = open_db(c["db_file"])
+    try:
+        rows = db.execute("SELECT filter, gain, file FROM frames "
+                          "WHERE night_id=?", (night_id,)).fetchall()
+    finally:
+        db.close()
+    out = {}
+    for filt, gain, name in rows:
+        m = DEG.search(name or "")
+        if not filt or not m:
+            continue
+        k = (filt, int(gain or 0))
+        a = float(m.group(1))
+        out.setdefault(k, {})[a] = out.get(k, {}).get(a, 0) + 1
+    return out
 
 
 def finalize(cfg: dict, night_id: str = None, cause: str = "") -> int:

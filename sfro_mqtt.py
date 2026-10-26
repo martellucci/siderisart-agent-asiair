@@ -615,9 +615,16 @@ class Publisher:
                     "left_time_min": round(left / 60) if left else None, "eta": eta,
                     "plan_name": plan.get("plan_name"), "plan_started": bool(plan.get("is_plan_started")),
                     "capturing": capturing,
+                    "capture_state": cap.get("state"),   # es. first_delay/expose
                 }
+                # Temperature e' in DECIMI di grado (come in camera_cooling
+                # dell'agente): 209 = 20.9°C. Pubblicata grezza fino al 2026-10-25
+                # (Status del bot: "Camera 206°C").
+                tdec = gv("Temperature")
                 out["camera"] = {
-                    "sensor_temp_c": gv("Temperature"), "target_temp_c": gv("TargetTemp"),
+                    "sensor_temp_c": (round(float(tdec) / 10.0, 1)
+                                      if isinstance(tdec, (int, float)) else None),
+                    "target_temp_c": gv("TargetTemp"),
                     "cooler_pct": gv("CoolPowerPerc"), "cooler_on": bool(gv("CoolerOn")),
                     "gain": gv("Gain"),
                 }

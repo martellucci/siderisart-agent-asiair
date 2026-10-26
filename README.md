@@ -12,7 +12,7 @@
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT-f5e6b8" alt="MIT"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-071535" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/ASIAIR-firmware%20v1-0a1c3e" alt="ASIAIR v1">
+  <img src="https://img.shields.io/badge/ASIAIR-firmware%20v3%20tested-0a1c3e" alt="ASIAIR firmware v3 tested">
 </p>
 
 ---
@@ -43,6 +43,24 @@ evenings.
 > it.
 >
 > 👉 **[sideris.art/journal](https://sideris.art/journal/)**
+
+---
+
+## Tested hardware
+
+Tested on my rig on 26 October 2026 with the ASIAIR on **firmware v3**. The
+agent drives each of these devices directly.
+
+| Device | What the agent does with it |
+|---|---|
+| **ASIAIR**, firmware v3 | Signs the RSA handshake on port 4700 at every connection. Firmware v1 still works: when the box sends no challenge, the client carries on with the old protocol. |
+| **Imaging camera** | Connects it, runs cooling and gain, takes lights, flats and dark flats. |
+| **Guide camera** | Connects it and publishes guiding RMS over MQTT. |
+| **ZWO EAF** focuser | Connects it and logs autofocus runs. |
+| **ZWO EFW** filter wheel | Connects it and runs flats for each filter used that night. |
+| **ZWO CAA** rotator | Opens it at startup and turns it to each target's angle for the flats. |
+
+Other rigs are untested (see the honest notes below).
 
 ---
 
@@ -84,6 +102,10 @@ evenings.
 - **Flats per (filter, gain) actually used that night**: it reads from the
   session log which filters you shot and at what gain, groups them, sets panel
   brightness per group and runs one autorun for each, with AUTO exposure.
+- **With a ZWO CAA rotator, flats at each target's angle.** The angle comes
+  from the names of the night's lights. The two sides of a meridian flip count
+  as the same position, close angles merge into one, and dark flats don't
+  rotate.
 - **Dark flats** immediately after, panel off, at exactly the exposure computed
   from the flats it just took. The cooler stays on until the last dark; only
   then does the rig rest (cooler and heaters off) while the files are copied.
@@ -103,14 +125,16 @@ evenings.
 - **Telegram bot** with a button menu: status, power-on, start plan, manual sync,
   on-demand flats/darks, shutdown — every dangerous action behind a confirmation.
   The manual sync follows **exactly the same procedure**: one pass, the same
-  live message, the same texts.
+  live message, the same texts. During nautical night the status is one live
+  message too, rewritten in place every 9 minutes until dawn, and so are the
+  pre-flat drying and each group of flats and darks.
 - **One sync at a time**: the bot and the agent share a lock (`flock`), so two
   copies never fight over the same mount. Whoever arrives second doesn't start —
   the night pass skips silently, the post-flat sync waits, the button says
   "already running". The kernel releases the lock if the process dies.
 - **Per-target, per-night view on the NAS**: next to the raw mirror, a second
   tree `target/night/light|flat|dark` with the flats and darks matching each
-  target's filters and gain — built with **hardlinks**, so nothing takes space
+  target's filters, gain and rotator angle — built with **hardlinks**, so nothing takes space
   twice (CIFS doesn't allow symlinks). The night folder is named after the day
   in **your** time zone (`folder_timezone`), not the observatory's.
 - **MQTT telemetry** to Home Assistant: ~60 entities covering guiding (RMS and
@@ -230,7 +254,8 @@ to break — and if it does hang, the next timer fires anyway.
 
 ## Requirements
 
-- An **ASIAIR** on **firmware v1** (the 2.x app). See the note on v3 below.
+- An **ASIAIR** on **firmware v3** (tested) or v1. On v3 the agent needs a key
+  from the app, see the note below.
 - A **Linux server** that stays on, able to reach the ASIAIR over the network
   (directly or through a VPN). A mini PC or a Raspberry Pi is plenty.
 - Python **3.10+** and the three dependencies in `requirements.txt`
@@ -244,15 +269,16 @@ to break — and if it does hang, the next timer fires anyway.
   Without one the agent still works: treat the roof as always open and keep the
   rest of the automation.
 
-### ⚠️ ASIAIR firmware v3
+### ASIAIR firmware v3
 
 From firmware v3 onwards, port 4700 requires an **RSA authentication handshake**
-using a key embedded in the app. This code is validated on **v1** and would stop
-at the first command on v3. In `tools/asiair-tool/` you'll find the scripts (MIT,
-from [cpius/asiair-tool](https://github.com/cpius/asiair-tool)) to extract that
-key from the APK and test the handshake; porting it into `asiair_client.py` is
-work I haven't done yet. **App updates cannot be undone**: turn off automatic
-updates until you're ready.
+with a key embedded in the app. `asiair_client.py` signs it at every connection,
+and when the box sends no challenge it goes on with the old protocol, so the
+same code runs on v1 and v3. The key is not in the repo: you extract it from your
+own copy of the app with the scripts in `tools/asiair-tool/` (MIT, from
+[cpius/asiair-tool](https://github.com/cpius/asiair-tool)), as explained in
+[docs/CREDENTIALS.md](docs/CREDENTIALS.md). **App updates cannot be undone**, so
+put the key in place before you update.
 
 ---
 
@@ -334,7 +360,7 @@ evening.
 
 ## Tests
 
-Twenty-one test scripts, **entirely offline**: no rig, no network, no NAS. They use
+Twenty-two test scripts, **entirely offline**: no rig, no network, no NAS. They use
 fake ASIAIRs, an in-memory fake Google Sheet and temporary sandboxes, and they
 cover the real failures that produced the safeguards listed above.
 
@@ -349,7 +375,7 @@ the agent loose on a clear night.
 
 ## Honest notes, before you build on this
 
-- **The project is tailored to my setup.** Mono camera with a filter wheel,
+- **The project is tailored to my setup.** Mono camera with filter wheel and rotator,
   equatorial mount, motorised flat panel, Kasa plugs, Alpaca roof. With a
   different setup some parts won't apply and others will need rewriting.
 - **It is not tested on any other rig.** It works on mine, every night, but I

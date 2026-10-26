@@ -191,11 +191,12 @@ python3 tools/asiair-tool/handshake.py --host 198.51.100.20 --key asiair_key.pem
 chmod 600 asiair_key.pem
 ```
 
-> **Current status**: `asiair_client.py` **does not implement the handshake yet**,
-> so this code works on **firmware v1** and not on v3. The scripts in
-> `tools/asiair-tool/` (third-party, MIT) are there to prepare that migration and
-> to check that the key is the right one. Until the handshake is ported into the
-> client, **do not update the app**: the update cannot be rolled back.
+> **Current status**: `asiair_client.py` performs the handshake in `connect()`,
+> so it covers every command of every flow. When the box sends no challenge
+> (firmware v1) it carries on without signing. Tested on firmware v3 on
+> 26 October 2026. Put the key next to `asiair_client.py`; the scripts in
+> `tools/asiair-tool/` (third-party, MIT) let you check that it is the right one
+> before a night.
 >
 > Legal note: extracting a key from an app you are licensed to use, in order to
 > make a device you own talk to your own software, is textbook interoperability

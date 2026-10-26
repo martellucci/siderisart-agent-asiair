@@ -12,7 +12,7 @@
 <p align="center">
   <a href="#licenza"><img src="https://img.shields.io/badge/licenza-MIT-f5e6b8" alt="MIT"></a>
   <img src="https://img.shields.io/badge/python-3.10%2B-071535" alt="Python 3.10+">
-  <img src="https://img.shields.io/badge/ASIAIR-firmware%20v1-0a1c3e" alt="ASIAIR v1">
+  <img src="https://img.shields.io/badge/ASIAIR-firmware%20v3%20tested-0a1c3e" alt="ASIAIR firmware v3 provato">
 </p>
 
 ---
@@ -42,6 +42,24 @@ le stesse serate perse.
 > imparo notte dopo notte — e le foto che ne escono.
 >
 > 👉 **[sideris.art/journal](https://sideris.art/journal/)**
+
+---
+
+## Hardware provato
+
+Provato sul mio rig il 26 ottobre 2026 con l'ASIAIR su **firmware v3**.
+L'agente comanda direttamente ognuno di questi dispositivi.
+
+| Dispositivo | Cosa ci fa l'agente |
+|---|---|
+| **ASIAIR**, firmware v3 | Firma l'handshake RSA sul canale 4700 a ogni connessione. Il firmware v1 funziona ancora: se il box non chiede la firma, il client prosegue da solo con il vecchio protocollo. |
+| **Camera di ripresa** | La collega, gestisce raffreddamento e gain, fa light, flat e dark flat. |
+| **Camera guida** | La collega e pubblica l'RMS della guida via MQTT. |
+| Focheggiatore **ZWO EAF** | Lo collega e registra le messe a fuoco automatiche. |
+| Ruota portafiltri **ZWO EFW** | La collega e fa i flat per ogni filtro usato nella notte. |
+| Rotatore **ZWO CAA** | Lo apre all'avvio e lo porta all'angolo di ogni soggetto per i flat. |
+
+Su altri impianti non è provato (vedi le note oneste più sotto).
 
 ---
 
@@ -84,6 +102,10 @@ le stesse serate perse.
   legge dal diario quali filtri hai ripreso e con che gain, raggruppa, imposta
   la luminosità del pannello per gruppo e lancia un autorun per ciascuno con
   tempo di posa AUTO.
+- **Con un rotatore ZWO CAA, flat all'angolo di ogni soggetto.** L'angolo si
+  legge dai nomi dei light della notte. I due lati del meridian flip contano
+  come la stessa posizione, gli angoli vicini diventano uno solo e i dark flat
+  non ruotano.
 - **Dark flat** subito dopo, a pannello spento, con la posa esatta calcolata dai
   flat appena fatti. Il cooler resta acceso fino all'ultimo dark; solo dopo il
   rig va a riposo (cooler e scaldiglie spenti) mentre i file vengono copiati.
@@ -103,14 +125,16 @@ le stesse serate perse.
 - **Bot Telegram** con menu a bottoni: stato, avvio, avvio piano, sync manuale,
   flat/dark a comando, spegnimento — tutte le operazioni pericolose con conferma.
   Il sync manuale segue **esattamente la stessa procedura**: una passata, lo
-  stesso messaggio «vivo», gli stessi testi.
+  stesso messaggio «vivo», gli stessi testi. Nella notte nautica anche lo
+  Status è un unico messaggio «vivo», riscritto al suo posto ogni 9 minuti
+  fino all'alba, e così l'asciugatura pre-flat e ogni gruppo di flat e dark.
 - **Un sync alla volta**: bot e agente condividono un lock (`flock`), così due
   copie non si contendono mai lo stesso mount. Chi arriva secondo non parte — la
   passata notturna salta in silenzio, il sync dopo i flat aspetta, il bottone
   risponde "già in corso". Se il processo muore, il kernel libera il lock.
 - **Vista per soggetto e per notte sul NAS**: accanto al mirror grezzo, un
-  secondo albero `soggetto/notte/light|flat|dark` con i flat e i dark dei filtri
-  e del gain di ciascun soggetto — fatto con **hardlink**, quindi niente occupa
+  secondo albero `soggetto/notte/light|flat|dark` con i flat e i dark dei filtri,
+  del gain e dell'angolo del rotatore di ciascun soggetto — fatto con **hardlink**, quindi niente occupa
   spazio due volte (CIFS non accetta symlink). La cartella della notte porta il
   giorno del **tuo** fuso orario (`folder_timezone`), non quello dell'osservatorio.
 - **Telemetria MQTT** verso Home Assistant: ~60 entità fra guida (RMS e picchi
@@ -226,7 +250,8 @@ da rompere — e se si impianta, il timer successivo riparte comunque.
 
 ## Requisiti
 
-- **ASIAIR** con **firmware v1** (l'app 2.x). Vedi la nota sulla v3 più sotto.
+- **ASIAIR** con **firmware v3** (provato) o v1. Sulla v3 all'agente serve una
+  chiave presa dall'app, vedi la nota più sotto.
 - Un **server Linux** sempre acceso, raggiungibile in rete con l'ASIAIR
   (direttamente o via VPN). Basta un mini PC o un Raspberry.
 - Python **3.10+** e le tre dipendenze in `requirements.txt`
@@ -240,15 +265,16 @@ da rompere — e se si impianta, il timer successivo riparte comunque.
   automatica. Senza, l'agente funziona lo stesso: consideri il tetto sempre
   aperto e ti tieni l'automazione del resto.
 
-### ⚠️ Firmware ASIAIR v3
+### Firmware ASIAIR v3
 
 Dal firmware v3 il canale 4700 richiede un **handshake RSA di autenticazione**
-con una chiave che sta dentro l'app. Questo codice è validato su **v1** e su v3
-si fermerebbe al primo comando. In `tools/asiair-tool/` trovi gli script (MIT,
-di [cpius/asiair-tool](https://github.com/cpius/asiair-tool)) per estrarre la
-chiave dall'APK e provare l'handshake; il portarlo dentro `asiair_client.py` è
-un lavoro che non ho ancora fatto. **Se aggiorni l'app, non torni indietro**:
-disattiva l'aggiornamento automatico finché non sei pronto.
+con una chiave che sta dentro l'app. `asiair_client.py` la firma a ogni
+connessione e, se il box non manda la sfida, prosegue con il vecchio protocollo,
+quindi lo stesso codice gira su v1 e su v3. La chiave non è nel repo: la estrai
+dalla tua copia dell'app con gli script in `tools/asiair-tool/` (MIT, di
+[cpius/asiair-tool](https://github.com/cpius/asiair-tool)), come spiegato in
+[docs/it/CREDENZIALI.md](docs/it/CREDENZIALI.md). **Se aggiorni l'app non torni
+indietro**, quindi metti a posto la chiave prima di aggiornare.
 
 ---
 
@@ -330,7 +356,7 @@ Questo è il valore vero del progetto. Ogni riga qui sotto è una serata persa.
 
 ## Test
 
-Ventuno script di test **completamente offline**: niente rig, niente rete,
+Ventidue script di test **completamente offline**: niente rig, niente rete,
 niente NAS. Usano finti ASIAIR, finti Google Sheet in memoria e sandbox
 temporanee, e coprono i guasti veri che hanno generato le contromisure qui
 sopra.
@@ -346,7 +372,7 @@ mandare l'agente in produzione su una notte serena.
 
 ## Note oneste, prima che tu ci metta le mani
 
-- **Il progetto è cucito sul mio setup.** Camera mono con ruota portafiltri,
+- **Il progetto è cucito sul mio setup.** Camera mono con ruota portafiltri e rotatore,
   montatura equatoriale, flat panel motorizzato, prese Kasa, tetto Alpaca. Con
   un setup diverso alcune parti non ti serviranno e altre andranno riscritte.
 - **Non è testato su altri impianti.** Funziona sul mio, tutte le notti, ma non

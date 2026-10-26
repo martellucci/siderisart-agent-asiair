@@ -9,8 +9,9 @@
 > generato ogni contromisura: li pubblico com'erano perche' e' la forma in cui
 > sono davvero utili.
 >
-> **Validato su firmware v1.** Dalla v3 il canale 4700 richiede un handshake
-> RSA: vedi [CREDENZIALI.md](CREDENZIALI.md).
+> **Validato su firmware v1 e v3.** Dalla v3 il canale 4700 richiede un
+> handshake RSA, che `asiair_client.py` esegue. La chiave viene dall'app, vedi
+> [CREDENZIALI.md](CREDENZIALI.md).
 >
 > ZWO puo' cambiare tutto a ogni aggiornamento, senza dirlo a nessuno.
 > Se trovi differenze sul tuo box, apri una issue: questa mappa cresce cosi'.
@@ -356,6 +357,9 @@ tranne `test_connection` e `get_verify_str` (vedi sopra) — sondare con
 `pi_is_verified` significherebbe aspettare un timeout a ogni connessione.
 Conferma indipendente arrivata dal forum SFRO (16/8): un utente su firmware v3
 descrive la stessa sequenza e lo stesso fallback "solo il 103 e' legacy".
+
+**Aggiornamento, ottobre 2026**: il box e' passato al firmware v3 il 24 ottobre
+e l'agente ci e' stato provato il 26 ottobre.
 
 ### Porta 4800 — come sono fatti i dati delle immagini
 Decodificata da tankhardrive (noi non ne abbiamo bisogno, le immagini arrivano

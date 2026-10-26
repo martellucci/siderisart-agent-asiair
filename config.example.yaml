@@ -71,7 +71,9 @@ asiair:
   # negativi, visto 2026-07-06); vpn_diagnose usa PRIMA l'ICMP "host unreachable"
   # del router SFRO (From 172.*) attraverso il tunnel, la sonda e' solo fallback.
   vpn_probe_host: "198.51.100.1"   # <<< IP del router remoto (sonda VPN)
-  # I 5 device che DEVONO risultare connessi (collegati dall'utente via app).
+  # I device che DEVONO risultare connessi (li apre connect_all all'avvio T-10).
+  # Con il rotatore ZWO CAA aggiungi "caa" (2026-10-25): connect_all lo apre
+  # e senza CAA aperto il piano NON parte.
   required_devices: ["camera", "focuser", "wheel", "mount", "guide"]
   # WATCHDOG STALLO (2026-08-17): piano "avviato" ma residuo (get_plan)
   # invariato da N minuti -> allarme Telegram ripetuto (solo avviso, l'agente
@@ -206,6 +208,15 @@ flat_flow:
   # a 67% attesi ~R 7s B 5.5s G 2.5s, tutti comodi nella finestra 1-15s)
   # Scelta utente 2026-07-26.
   brightness_by_filter_gain0: {R: 67, G: 67, B: 67}
+  # ROTATORE ZWO CAA (2026-10-24): i flat si fanno all'angolo di ripresa di
+  # OGNI soggetto (sogg1 L a 30°, sogg2 L+H a 40° -> flat L30, L40, H40).
+  # Angoli dai nomi dei light (angolo in cielo; i due lati del meridian flip
+  # sono la stessa posizione), angoli entro la tolleranza = uno solo.
+  # I dark NON ruotano. A flat finiti il rotatore resta sull'ultimo angolo.
+  # Senza rotatore lascialo spento: i flat si fanno senza rotazione.
+  rotator:
+    enabled: false
+    tolerance_deg: 2
   idle_brightness: 5            # "chiuso e spento" (luce trascurabile)
   # Fascia anticondensa = uscita 'dew_heater' (output 4) dell'ASIAIR: al
   # 100% durante l'asciugatura pre-flat, riportata al 5% ("spenta") subito
@@ -308,6 +319,10 @@ telegram: {enabled: true}
 telegram_bot:
   enabled: true
   poll_timeout_seconds: 50   # long polling getUpdates
+  # Status a riquadro «vivo» (2026-10-20): nella notte nautica il messaggio si
+  # riscrive al suo posto ogni N minuti fino all'alba nautica
+  status_live_minutes: 9
+  status_live_file: /var/lib/sfro-agent/status_live.json
 
 # Marker scritto dallo Shutdown manuale del bot: se e' della notte corrente,
 # l'agente NON riaccende il rig (lo Start manuale lo cancella).
@@ -393,6 +408,7 @@ sessioni_giornaliere:
   mode: hardlink                # hardlink | copy (copy = file doppi sul NAS)
   nights_back: 2
   folder_timezone: Europe/Rome  # fuso che da' il NOME alla cartella-data
+  angle_tolerance_deg: 2        # flat abbinati all'angolo del soggetto (rotatore, 2026-10-24)
 
 # --------------------------------------------------------------------------- #
 # STIMA CONDENSA (2026-09-06) — stazione meteo di sito SFRO sulla STESSA API

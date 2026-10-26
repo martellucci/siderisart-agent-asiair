@@ -52,7 +52,15 @@ KEY_FILE = os.path.join(HERE, "asiair_key.pem")
 # senza memoria pagherebbe una sonda in piu' a ogni comando, sulla VPN, anche
 # sul firmware vecchio dove non serve a niente. Si memorizza solo "legacy": su
 # v3 lo sblocco e' per-connessione e la firma va rifatta ogni volta.
+# "legacy" SCADE (2026-10-25): bot e MQTT sono processi lunghi, nati il 24/10
+# con l'ASIAIR ancora 13.41 e rimasti "legacy" anche dopo l'upgrade alla v3
+# del pomeriggio -> ogni loro comando ignorato in silenzio, Shutdown dal bot
+# del 25/10 fallito. Dopo LEGACY_TTL_S si risonda; un timeout su un canale
+# creduto legacy (e' proprio cosi' che la v3 tratta chi non firma) cancella
+# subito la memoria.
 _VERIFY_MODE: dict = {}
+_LEGACY_TS: dict = {}
+LEGACY_TTL_S = 600
 
 
 def _sign_challenge(challenge: str, key_file: str = KEY_FILE) -> str:
@@ -112,8 +120,11 @@ class AsiairClient:
         ripete alla prossima connessione. Se invece la sfida ARRIVA — e allora
         il box e' certamente v3 e senza firma ignorerebbe ogni comando — un
         fallimento diventa un errore ESPLICITO: mai un timeout muto."""
-        if _VERIFY_MODE.get((self.ip, self.port)) == "legacy":
-            return
+        key = (self.ip, self.port)
+        if _VERIFY_MODE.get(key) == "legacy":
+            if time.time() - _LEGACY_TS.get(key, 0) < LEGACY_TTL_S:
+                return
+            _VERIFY_MODE.pop(key, None)      # scaduto: il firmware puo' essere cambiato
         budget = min(self.timeout, 5.0)
         try:
             r, _ = self.call("get_verify_str", [], max_wait=budget)
@@ -124,6 +135,7 @@ class AsiairClient:
             res if isinstance(res, str) else None)
         if not challenge:                    # code 103: firmware senza handshake
             _VERIFY_MODE[(self.ip, self.port)] = "legacy"
+            _LEGACY_TS[(self.ip, self.port)] = time.time()
             return
         _VERIFY_MODE[(self.ip, self.port)] = "v3"
         try:
@@ -182,13 +194,18 @@ class AsiairClient:
         self._send({"id": my_id, "method": method, "params": params})
         events = []
         deadline = time.time() + (max_wait or self.timeout)
-        while True:
-            if time.time() > deadline:
-                raise TimeoutError(f"nessuna risposta a '{method}' (id={my_id})")
-            msg = self._read_line()
-            if isinstance(msg, dict) and msg.get("id") == my_id:
-                return msg, events
-            events.append(msg)
+        try:
+            while True:
+                if time.time() > deadline:
+                    raise TimeoutError(f"nessuna risposta a '{method}' (id={my_id})")
+                msg = self._read_line()
+                if isinstance(msg, dict) and msg.get("id") == my_id:
+                    return msg, events
+                events.append(msg)
+        except TimeoutError:                 # anche il "timed out" del socket
+            if _VERIFY_MODE.get((self.ip, self.port)) == "legacy":
+                _VERIFY_MODE.pop((self.ip, self.port), None)       # forse ora e' v3
+            raise
 
 
 def _p(obj):
