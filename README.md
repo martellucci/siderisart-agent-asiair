@@ -360,7 +360,7 @@ evening.
 
 ## Tests
 
-Twenty-two test scripts, **entirely offline**: no rig, no network, no NAS. They use
+Twenty-six test scripts, **entirely offline**: no rig, no network, no NAS. They use
 fake ASIAIRs, an in-memory fake Google Sheet and temporary sandboxes, and they
 cover the real failures that produced the safeguards listed above.
 

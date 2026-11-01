@@ -30,10 +30,12 @@ Dipendenze: requests, astral, PyYAML.
 
 import argparse
 import fcntl
+import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -1994,7 +1996,7 @@ def sync_live_text(cosa: str, stato: str, r: dict, elapsed_s: float,
     if tf is None:
         righe.append(f"{cf} file · {_vol(cb)} copiati")
     elif tf == 0:
-        righe.append("niente da copiare: il NAS è già allineato")
+        righe.append("niente da copiare: è già tutto in archivio")
     else:
         pct = (100 * cb / tb) if tb else (100 * cf / tf)
         righe += [_bar(pct), f"{cf}/{tf} file · {_vol(cb, tb)}"]
@@ -2170,7 +2172,9 @@ def sync_done_text(cosa: str, r: dict) -> str:
     det = " · ".join(f"{k} {bk.get(k, 0)}" for k in ("light", "flat", "dark"))
     cb, el = int(r.get("bytes") or 0), float(r.get("elapsed_s") or 0)
     vel = f" ({_num(cb / el / 1e6)} MB/s)" if cb and el >= 60 else ""
-    return (f"✅ {cosa} completato: {int(r.get('copied') or 0)} file · "
+    dove = {"ssd": " sull'SSD", "nas": (" sul NAS (ripiego)" if r.get("dest_why")
+                                        else " sul NAS")}.get(r.get("dest"), "")
+    return (f"✅ {cosa} completato{dove}: {int(r.get('copied') or 0)} file · "
             f"{_vol(cb)} in {_dur(el)}{vel}" + (f" — {det}" if bk else "") + ".")
 
 
@@ -2271,6 +2275,218 @@ def vpn_diagnose(host: str, probe: str = "") -> dict:
 
 def is_mounted(path: str) -> bool:
     return os.path.ismount(path)
+
+
+# DESTINAZIONE DEI FITS (richiesta utente 2026-10-31): lo spazio RAID del NAS
+# e' per cio' che va conservato, i FITS giornalieri vanno sull'SSD USB
+# (ssd_dest). Il NAS resta il RIPIEGO, nella stessa destinazione di sempre,
+# quando l'SSD non e' montato, e' in sola lettura, ha errori registrati dal
+# filesystem, non ha spazio o non si lascia scrivere. Una notte persa e' il
+# danno minore: si riprende. Sotto ogni radice la struttura e' identica
+# (<radice>/asiair_sfro/ASIAIR/... e <radice>/sessioni_giornaliere/...).
+# Il controllo di montaggio e' quello che conta: SSD staccato = cartella vuota
+# sul disco del container, che rsync riempirebbe (2,4 GB liberi) fermando tutto.
+DEST_STATE_DEFAULT = "/var/lib/sfro-agent/sync_dest.json"
+FALLBACK_LEDGER_DEFAULT = "/var/lib/sfro-agent/nas_ripiego.json"
+EXT4_SYS = "/sys/fs/ext4"      # <dev>/errors_count: errori registrati dal kernel
+
+
+def _mount_entry(path: str) -> tuple:
+    """(device, opzioni) del filesystem montato ESATTAMENTE su path, o
+    (None, set()) se non c'e'."""
+    found = (None, set())
+    try:
+        with open("/proc/mounts") as fh:
+            for ln in fh:
+                f = ln.split()
+                if len(f) >= 4 and f[1].replace("\\040", " ") == path:
+                    found = (f[0], set(f[3].split(",")))   # l'ultimo vince
+    except OSError:
+        pass
+    return found
+
+
+def ssd_problem(sc: dict) -> tuple:
+    """(motivo per NON usare l'SSD oppure None, GB liberi o None)."""
+    ssd = sc.get("ssd_dest") or ""
+    if not is_mounted(ssd):
+        return "SSD non montato (staccato o non riconosciuto)", None
+    dev, opts = _mount_entry(ssd)
+    if "ro" in opts:
+        return "SSD montato in sola lettura (errore del disco?)", None
+    try:
+        n = int((Path(EXT4_SYS) / Path(dev).name / "errors_count")
+                .read_text().strip()) if dev else 0
+    except (OSError, ValueError):
+        n = 0                    # contatore non leggibile: non e' un errore
+    if n > 0:
+        return (f"il filesystem dell'SSD ha registrato {n} errori: serve un "
+                "controllo (fsck) dall'host", None)
+    st = os.statvfs(ssd)
+    free_gb = st.f_bavail * st.f_frsize / 1e9
+    need = float(sc.get("ssd_min_free_gb", 20))
+    if free_gb < need:
+        return (f"SSD quasi pieno ({_num(free_gb)} GB liberi, minimo "
+                f"{need:g})", free_gb)
+    prova = Path(ssd) / ".sfro_prova_scrittura"
+    try:
+        with open(prova, "wb") as fh:
+            fh.write(b"sfro")
+            fh.flush()
+            os.fsync(fh.fileno())
+        prova.unlink()
+    except OSError as e:
+        return f"scrittura sull'SSD fallita ({e.strerror or e})", free_gb
+    return None, free_gb
+
+
+def sync_root(sc: dict) -> tuple:
+    """(radice, motivo del ripiego sul NAS o None, GB liberi sull'SSD)."""
+    if not sc.get("ssd_dest"):
+        return sc["nas_dest"], None, None
+    why, free_gb = ssd_problem(sc)
+    return (sc["nas_dest"] if why else sc["ssd_dest"]), why, free_gb
+
+
+def dest_notice(sc: dict, root: str, why, free_gb) -> str:
+    """Avviso per Telegram al CAMBIO di destinazione (SSD -> NAS e ritorno) o
+    quando lo spazio sull'SSD scende sotto ssd_warn_free_gb: una volta per
+    evento, chiunque sincronizzi (agente o bot), grazie a un piccolo file di
+    stato. Stringa vuota = niente da dire."""
+    if not sc.get("ssd_dest"):
+        return ""
+    path = Path(sc.get("dest_state_file") or DEST_STATE_DEFAULT)
+    try:
+        prev = json.loads(path.read_text())
+    except (OSError, ValueError):
+        prev = {"dest": "ssd", "low": False}
+    cur = {"dest": "nas" if why else "ssd", "low": prev.get("low", False)}
+    msg = []
+    if cur["dest"] == "nas" and prev.get("dest") != "nas":
+        msg.append(f"⚠️ FITS salvati sul NAS (ripiego): {why}. Al ritorno "
+                   "dell'SSD li riporto lì da solo.")
+    elif cur["dest"] == "ssd" and prev.get("dest") == "nas":
+        msg.append("✅ SSD di nuovo disponibile: i FITS tornano sull'SSD.")
+    warn = float(sc.get("ssd_warn_free_gb", 40))
+    if free_gb is not None:
+        if free_gb < warn and not cur["low"]:
+            cur["low"] = True
+            msg.append(f"💽 SSD: restano {_num(free_gb)} GB liberi (soglia "
+                       f"{warn:g}). Scarica e cancella i FITS già impilati; "
+                       f"sotto {float(sc.get('ssd_min_free_gb', 20)):g} GB "
+                       "salvo sul NAS.")
+        elif free_gb >= warn + 5:
+            cur["low"] = False    # isteresi: niente avvisi a ripetizione
+    if cur != prev:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(cur))
+        except OSError as e:
+            log.warning("stato destinazione sync non salvato: %s", e)
+    return "\n".join(msg)
+
+
+def _ledger(sc: dict) -> Path:
+    return Path(sc.get("fallback_ledger") or FALLBACK_LEDGER_DEFAULT)
+
+
+def _ledger_load(sc: dict) -> list:
+    try:
+        return list(json.loads(_ledger(sc).read_text()))
+    except (OSError, ValueError):
+        return []
+
+
+def _ledger_save(sc: dict, rels: list) -> None:
+    p = _ledger(sc)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if rels:
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(sorted(set(rels)), indent=0))
+        tmp.replace(p)
+    else:
+        p.unlink(missing_ok=True)
+
+
+def _copy_verified(src: Path, dst: Path) -> None:
+    """Copia src -> dst e verifica il contenuto (MD5 letto dalla sorgente
+    durante la copia, riletto dalla destinazione). Solleva OSError se non
+    coincide; dst appare solo a copia verificata."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + ".rientro")
+    h_src = hashlib.md5()
+    with open(src, "rb") as fi, open(tmp, "wb") as fo:
+        for b in iter(lambda: fi.read(1 << 22), b""):
+            h_src.update(b)
+            fo.write(b)
+        fo.flush()
+        os.fsync(fo.fileno())
+    h_dst = hashlib.md5()
+    with open(tmp, "rb") as fi:
+        for b in iter(lambda: fi.read(1 << 22), b""):
+            h_dst.update(b)
+    if h_src.digest() != h_dst.digest():
+        tmp.unlink(missing_ok=True)
+        raise OSError(f"contenuto diverso dopo la copia: {dst.name}")
+    shutil.copystat(src, tmp)     # data di modifica = incrementale di rsync
+    tmp.replace(dst)
+
+
+def rientro_ssd(sc: dict, cfg: dict, t_end: float) -> dict:
+    """Riporta sull'SSD i file finiti sul NAS durante un ripiego (registro
+    nas_ripiego.json, scritto dalle passate di ripiego). Per ogni file: copia
+    sull'SSD, verifica MD5, POI cancella dal NAS — anche gli hardlink della
+    vista sessioni_giornaliere sul NAS, che altrimenti tengono vivo il file.
+    Tocca SOLO i file del registro: lo storico sul NAS non si tocca mai.
+    Si ferma a t_end (monotonic): il resto resta nel registro."""
+    res = {"moved": 0, "bytes": 0, "errors": 0, "left": 0, "nights": set()}
+    rels = _ledger_load(sc)
+    if not rels:
+        return res
+    nas, ssd = Path(sc["nas_dest"]), Path(sc["ssd_dest"])
+    if not is_mounted(str(nas)):
+        res["left"] = len(rels)
+        return res
+    resto, moved_names = [], {}
+    for i, rel in enumerate(rels):
+        if time.monotonic() > t_end:
+            resto += rels[i:]
+            break
+        src, dst = nas / rel, ssd / rel
+        try:
+            if not src.is_file():
+                continue          # gia' riportato o cancellato a mano
+            size = src.stat().st_size
+            if not (dst.is_file() and dst.stat().st_size == size):
+                _copy_verified(src, dst)
+            src.unlink()
+            moved_names[src.name] = size
+            res["moved"] += 1
+            res["bytes"] += size
+            p = SG.parse_name(src.name) if SG else None
+            if p:
+                res["nights"].add(SG.night_of(p["utc"], ZoneInfo(
+                    SG.sg_cfg(cfg).get("folder_timezone", "Europe/Rome"))))
+        except OSError as e:
+            res["errors"] += 1
+            resto.append(rel)
+            log.warning("rientro sull'SSD non riuscito (%s): %s", rel, e)
+    if moved_names and SG:
+        vista = nas / Path(SG.sg_cfg(cfg).get("dest", "sessioni_giornaliere")).name
+        for root, _d, files in os.walk(vista):
+            for f in files:
+                p = Path(root) / f
+                try:
+                    if f in moved_names and p.stat().st_size == moved_names[f]:
+                        p.unlink()
+                except OSError as e:
+                    log.warning("vista sul NAS non ripulita (%s): %s", p, e)
+    _ledger_save(sc, resto)
+    res["left"] = len(resto)
+    if res["moved"]:
+        log.info("rientro sull'SSD: %d file (%s), %d errori, %d in attesa",
+                 res["moved"], _vol(res["bytes"]), res["errors"], res["left"])
+    return res
 
 
 # Smistamento per data sul NAS (2026-07-26). L'ASIAIR ammucchia tutti i frame
@@ -2441,11 +2657,37 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
     res = {"ok": False, "files": 0, "error": None, "copied": 0, "bytes": 0}
     t_call = time.monotonic()
     stop_tick = threading.Event()
-    nas = sc["nas_dest"]
-    if not is_mounted(nas):
-        res["error"] = f"NAS dest non montato: {nas}"
+    # SSD o NAS (2026-10-31): scelta UNA volta per passata, prima di copiare
+    root, why, free_gb = sync_root(sc)
+    ripiego = bool(why)                # NAS al posto dell'SSD
+    res.update(dest="ssd" if sc.get("ssd_dest") and not why else "nas",
+               dest_why=why, ssd_free_gb=free_gb)
+    if not is_mounted(root):
+        res["error"] = (f"nessuna destinazione: {why} e NAS non montato"
+                        if ripiego else f"NAS dest non montato: {root}")
         log.error(res["error"])
         return res
+    if ripiego:
+        log.warning("FITS sul NAS (ripiego): %s", why)
+    notice = [] if dry_run else [dest_notice(sc, root, why, free_gb)]
+    res["dest_notice"] = ""
+    rientro = None
+    if res["dest"] == "ssd" and not dry_run:
+        # PRIMA delle passate: cio' che e' tornato sull'SSD non si riscarica
+        # dall'ASIAIR. Al massimo 10' a passata, il resto alla successiva.
+        rientro = rientro_ssd(sc, cfg or {}, time.monotonic() + 600)
+        res["rientro"] = rientro
+        if rientro["moved"]:
+            notice.append(f"↩️ Riportati sull'SSD {rientro['moved']} file "
+                          f"({_vol(rientro['bytes'])}) salvati sul NAS durante "
+                          "il ripiego, e tolti dal NAS"
+                          + (f"; {rientro['left']} ancora da riportare"
+                             if rientro["left"] else "") + ".")
+        if rientro["errors"]:
+            notice.append(f"⚠️ {rientro['errors']} file non riportati "
+                          "sull'SSD: restano sul NAS, riprovo alla prossima "
+                          "passata.")
+    res["dest_notice"] = "\n".join(t for t in notice if t)
     ip = sc["asiair_ip"]
     if not ping(ip):
         res["error"] = f"ASIAIR non raggiungibile: {ip}"
@@ -2471,7 +2713,9 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
         cap_min = cap_minutes or sc.get("per_run_cap_minutes", 30)
         t_start = time.monotonic()
         deadline = t_start + cap_min * 60
-        dest_root = Path(nas) / Path(mp).name   # /mnt/astronomia/asiair_sfro
+        dest_root = Path(root) / Path(mp).name  # <radice>/asiair_sfro
+        # file copiati sul NAS in ripiego: vanno nel registro del rientro
+        res["ripiego_rel"] = []
         # conteggio elementi trasferiti + dettaglio per tipo (per il bottone
         # Rsync del bot): righe -i con 2° carattere 'f' = file veri (le
         # directory non contano nel dettaglio)
@@ -2503,6 +2747,13 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
                     res["by_kind"][kind] += 1
                 if ln[0] in "<>" and len(ln) > 1 and ln[1] == "f":
                     _chiudi()
+                    if ripiego:
+                        try:
+                            res["ripiego_rel"].append(str(
+                                Path(dst).relative_to(root)
+                                / ln.split(" ", 2)[2]))
+                        except (IndexError, ValueError):
+                            pass
                     try:
                         in_corso.append(int(ln.split(" ", 2)[1]))
                     except (IndexError, ValueError):
@@ -2569,6 +2820,18 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
                 passes.append((["--exclude", DATED_GLOB],
                                str(src), str(dest_root / rel), kind))
 
+        # RIPIEGO sul NAS con l'SSD ancora leggibile (pieno, sola lettura,
+        # errori): i file gia' sull'SSD non si riscaricano dall'ASIAIR
+        # (--compare-dest, cartella per cartella, solo dove esiste)
+        if ripiego and is_mounted(sc.get("ssd_dest") or ""):
+            con = []
+            for filters, src, dst, kind in passes:
+                cmp_dir = Path(sc["ssd_dest"]) / Path(dst).relative_to(root)
+                extra = ([f"--compare-dest={cmp_dir}"]
+                         if cmp_dir.is_dir() else [])
+                con.append((filters + extra, src, dst, kind))
+            passes = con
+
         if progress and not dry_run:
             # SYNC LUNGHI (messaggio «vivo», 2026-10-13): prima di copiare, lo
             # stesso elenco di passate in --dry-run dice QUANTO c'e' da copiare
@@ -2601,13 +2864,24 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
         if err:
             res["error"] = err
             log.error(err)
+        if ripiego and res["ripiego_rel"] and not dry_run:
+            # anche a passata fallita: cio' che e' arrivato sul NAS va riportato
+            try:
+                _ledger_save(sc, _ledger_load(sc) + res["ripiego_rel"])
+            except OSError as e:
+                log.error("registro del ripiego non salvato: %s", e)
         # VISTA PER SOGGETTO x NOTTE (2026-09-17): i FITS sono gia' arrivati,
         # qui si aggiungono solo hardlink sul NAS — locale, incrementale e
         # limitata alle ultime notti. Non fatale per definizione: un problema
         # qui non deve fermare il flusso flat ne' lo spegnimento del rig.
         if SG and cfg and res["ok"] and not dry_run:
             try:
-                res["sess"] = SG.aggiorna(cfg)
+                res["sess"] = SG.aggiorna(SG.per_radice(cfg, root))
+                # notti riportate sull'SSD dal rientro: la loro vista si
+                # rifa' qui, anche se piu' vecchie di nights_back
+                if rientro and rientro["nights"]:
+                    SG.aggiorna(SG.per_radice(cfg, root),
+                                nights=sorted(rientro["nights"]))
             except Exception as e:                    # pragma: no cover
                 log.warning("vista sessioni giornaliere non aggiornata: %s", e)
     except subprocess.TimeoutExpired as e:
@@ -2945,6 +3219,8 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         r = sync_pass(sc, dry_run, cfg)
         if r.get("busy"):
             return r        # sta gia' copiando qualcun altro: niente avviso
+        if r.get("dest_notice"):
+            notify(r["dest_notice"])
         if r.get("error"):
             alert("sync", f"⚠️ Sync FITS in errore: {r['error']}")
         else:
@@ -2962,17 +3238,21 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             notify(f"💾 Sync FITS finale non avviato: è già in corso il {chi}, "
                    "che copia anche questi file.")
             return
-        notify("💾 Sync FITS finale verso il NAS avviato (può richiedere alcuni minuti)…")
+        notify("💾 Sync FITS finale avviato (può richiedere alcuni minuti)…")
         sync_mark()
         r = sync_pass(sc, dry_run, cfg)
+        if r.get("dest_notice"):
+            notify(r["dest_notice"])
         if r.get("busy"):
             notify(f"💾 Sync FITS finale non avviato: è già in corso il "
                    f"{r['busy']}, che copia anche questi file.")
         elif r.get("error"):
             notify(f"⚠️ Sync FITS finale in errore: {r['error']}")
         else:
+            dove = ("sull'SSD" if r.get("dest") == "ssd" else
+                    "sul NAS (ripiego)" if r.get("dest_why") else "sul NAS")
             notify(f"💾 Sync FITS finale completato ({r.get('files', 0)} elementi). "
-                   "Tutti salvati.")
+                   f"Tutti salvati {dove}.")
 
     # ------------------ storico sessioni (SQLite + Google Sheets) ------------------
     slc = cfg.get("session_log", {}) or {}
@@ -3365,7 +3645,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
         def ask_shutdown(again=False):
             """Domanda a bottoni di fine flusso MANUALE: spengo o lascio acceso?
             I bottoni li serve il bot (callback fs:yes / fs:no)."""
-            notify(("🌓 Flat e dark completati e sincronizzati sul NAS.\n"
+            notify(("🌓 Flat e dark completati e sincronizzati in archivio.\n"
                     if not again else
                     "❓ Aspetto ancora la risposta (flat e dark sono finiti).\n")
                    + "Spengo l'ASIAIR e tolgo corrente alle prese?",
@@ -3678,7 +3958,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 log.info("[dry-run] flat flow: sync finale + chiusura")
                 return
 
-            COSA = "Sync NAS flat/dark"
+            COSA = "Sync flat/dark"
 
             def sync_incomplete(text):
                 state["flat_stage"] = "sync_incomplete"
@@ -3705,7 +3985,7 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 # e lo si dice UNA volta sola
                 if not state.get("flat_sync_wait_ts"):
                     state["flat_sync_wait_ts"] = now.isoformat()
-                    notify(f"⏸ Sync NAS flat/dark in attesa: è in corso il {chi}. "
+                    notify(f"⏸ Sync flat/dark in attesa: è in corso il {chi}. "
                            "Riparto quando ha finito (i file già copiati si "
                            "saltano).")
                 return
@@ -3726,18 +4006,20 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
                 r = sync_pass(sc, dry_run, cfg, cap_minutes=cap,
                               progress=live.tick)
                 state.pop("flat_sync_started_ts", None)
+                if r.get("dest_notice"):
+                    notify(r["dest_notice"])
                 live.close(r, "completato ✅" if r.get("ok") else
                            "NON completato" if r.get("cap") else
                            "non avviato" if r.get("busy") else "in errore")
                 if r.get("busy"):         # preso da un altro tra controllo e avvio
                     state["flat_sync_wait_ts"] = now.isoformat()
-                    notify(f"⏸ Sync NAS flat/dark in attesa: è in corso il "
+                    notify(f"⏸ Sync flat/dark in attesa: è in corso il "
                            f"{r['busy']}. Riparto quando ha finito.")
                     return
                 if r.get("cap"):
                     return sync_incomplete(sync_cap_text(COSA, sc, r))
                 if r.get("error"):
-                    return fail(f"sync NAS finale in errore: {r['error']}"
+                    return fail(f"sync finale in errore: {r['error']}"
                                 + ". Spegnimento ANNULLATO.")
                 sess = SG.riepilogo(r["sess"]) if SG and r.get("sess") else ""
                 notify(sync_done_text(COSA, r) + ("\n" + sess if sess else ""))

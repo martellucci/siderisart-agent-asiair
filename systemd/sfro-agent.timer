@@ -7,7 +7,10 @@ Description=Esegue l'agente SFRO ogni 3 minuti (allineato al clock)
 # Da 5 a 3 minuti il 2026-08-15, insieme allo scarico del ciclo: il sync
 # incrementale e il push su Sheets hanno ora una cadenza propria, quindi un
 # ciclo costa ~2 s anche in ripresa (prima 30 s di mediana).
-OnCalendar=*:0/3
+# In UTC dal 2026-10-25: in ora locale, al ritorno all'ora solare, systemd
+# saltava l'ora ripetuta (02:57 CEST -> 03:00 CET: agente fermo un'ora la
+# notte del 25/10). Gli scatti restano ai minuti :00,:03,... (fusi a ore intere).
+OnCalendar=*:0/3 UTC
 AccuracySec=20s
 Persistent=true
 

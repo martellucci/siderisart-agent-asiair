@@ -92,6 +92,19 @@ def src_root(cfg: dict) -> Path:
             / Path(sc.get("mount_point", "/mnt/asiair_sfro")).name / "ASIAIR")
 
 
+def per_radice(cfg: dict, radice) -> dict:
+    """Copia di cfg con sorgente e vista sotto un'altra radice (2026-10-31: SSD
+    principale, NAS di ripiego): <radice>/asiair_sfro/ASIAIR e
+    <radice>/<nome della cartella dest>. Mirror e vista stanno SEMPRE sotto la
+    stessa radice: un hardlink non passa da un disco all'altro."""
+    out = dict(cfg)
+    out["sync_module"] = dict(cfg.get("sync_module") or {}, nas_dest=str(radice))
+    sg = dict(cfg.get("sessioni_giornaliere") or {})
+    sg["dest"] = str(Path(radice) / Path(sg.get("dest", DEFAULTS["dest"])).name)
+    out["sessioni_giornaliere"] = sg
+    return out
+
+
 def parse_name(name: str) -> dict | None:
     """(filtro, gain, istante UTC, angolo) dal nome file, None se non
     riconoscibile. angolo = None se il nome non lo porta."""
@@ -295,13 +308,21 @@ def main() -> int:
     ap.add_argument("--notte", action="append", metavar="AAAAMMGG",
                     help="notte da (ri)collegare; ripetibile")
     ap.add_argument("--dry-run", action="store_true",
-                    help="elenca soggetti e conteggi senza toccare il NAS")
+                    help="elenca soggetti e conteggi senza toccare nulla")
+    ap.add_argument("--radice", metavar="DIR",
+                    help="radice di mirror e vista (default: l'SSD se "
+                         "montato, altrimenti il NAS)")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     with open(a.config) as fh:
         cfg = yaml.safe_load(fh)
     cfg.setdefault("sessioni_giornaliere", {})["enabled"] = True
-    r = aggiorna(cfg, a.notte, a.dry_run)
+    sc = cfg.get("sync_module") or {}
+    ssd = sc.get("ssd_dest") or ""
+    radice = a.radice or (ssd if ssd and os.path.ismount(ssd)
+                          else sc.get("nas_dest", "/mnt/astronomia"))
+    print(f"radice: {radice}")
+    r = aggiorna(per_radice(cfg, radice), a.notte, a.dry_run)
     print(f"notti: {' '.join(r['nights'])} · soggetti: {r['soggetti']} · "
           f"light {r['light']} · flat {r['flat']} · dark {r['dark']} · "
           f"saltati {r['skipped']} · errori {r['errors']}")

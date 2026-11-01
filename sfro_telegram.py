@@ -76,7 +76,7 @@ CONFIRM_TEXT = {"start": "🚀 Stai per avviare ASIAIR, confermi?",
                             "• un piano o un autorun in corso viene FERMATO\n"
                             "• mount in park, OF2 chiuso, cooler acceso "
                             "(attesa temperatura)\n"
-                            "• flat/dark dei filtri di stanotte e sync sul NAS\n"
+                            "• flat/dark dei filtri di stanotte e sync dei FITS\n"
                             "• alla fine ti chiedo se spegnere tutto\n\n"
                             "⏳ Con asciugatura = attesa adattiva alla condensa "
                             "(5-30 min) a pannello chiuso, poi i flat\n"
@@ -105,13 +105,13 @@ CONFIRM_ALIAS = {"flatdark_now": "flatdark"}
 STOPFLAT_NO = {
     "running": "i FLAT sono già partiti: un autorun in corso non lo fermo.",
     "darks": "i DARK sono già partiti: un autorun in corso non lo fermo.",
-    "sync": "flat e dark sono già finiti: sto copiando i file sul NAS.",
+    "sync": "flat e dark sono già finiti: sto copiando i file in archivio.",
     "ask_shutdown": "flat e dark sono già finiti: sto aspettando la tua "
                     "risposta sullo spegnimento.",
     "done": "il flusso flat è già concluso.",
     "cancelled": "l'attesa flat è già stata interrotta.",
     "error": "il flusso flat è già fermo in errore.",
-    "sync_incomplete": "flat e dark sono già finiti (sync NAS incompleto: "
+    "sync_incomplete": "flat e dark sono già finiti (sync incompleto: "
                        "rilancia Rsync).",
 }
 
@@ -871,7 +871,7 @@ class SfroBot:
         self.send(f"✅ Richiesta presa in consegna dall'agente (entro 3 min).\n"
                   + attesa
                   + (f", fascia anticondensa al {hv}%" if okh else "")
-                  + ", poi flat e dark dei filtri di stanotte e sync sul NAS.\n"
+                  + ", poi flat e dark dei filtri di stanotte e sync dei FITS.\n"
                   "A fine processo ti chiederò se spegnere tutto.", thread=th)
 
     def do_stopflat(self, th):
@@ -969,7 +969,7 @@ class SfroBot:
             self.send(f"⏳ Rsync non avviato: è già in corso il {chi}. "
                       "Riprova quando ha finito.", thread=th)
             return
-        cosa = "Rsync ASIAIR→NAS (tutte le date)"
+        cosa = "Rsync ASIAIR (tutte le date)"
         # messaggio «vivo» come il sync dopo flat/dark (2026-10-13)
         live = A.SyncLive(cosa, sc, lambda t: self.send(t, thread=th), self.edit)
         # full=True: il bottone ignora la finestra di date recenti delle
@@ -979,6 +979,8 @@ class SfroBot:
         r = A.sync_pass(sc, dry_run=False, cfg=self.cfg, full=True,
                         cap_minutes=int(sc.get("long_sync_minutes", 100)),
                         progress=live.tick)
+        if r.get("dest_notice"):
+            self.send(r["dest_notice"], thread=th)
         live.close(r, "completato ✅" if r.get("ok") else
                    "NON completato" if r.get("cap") else
                    "non avviato" if r.get("busy") else "in errore")

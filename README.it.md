@@ -356,7 +356,7 @@ Questo è il valore vero del progetto. Ogni riga qui sotto è una serata persa.
 
 ## Test
 
-Ventidue script di test **completamente offline**: niente rig, niente rete,
+Ventisei script di test **completamente offline**: niente rig, niente rete,
 niente NAS. Usano finti ASIAIR, finti Google Sheet in memoria e sandbox
 temporanee, e coprono i guasti veri che hanno generato le contromisure qui
 sopra.

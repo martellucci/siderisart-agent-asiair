@@ -190,6 +190,8 @@ class FakeSL:
     def update_and_push(cfg): CALLS.append("diario"); return {"new": 0}
     @staticmethod
     def filters_gains_used(cfg, nid): return [("H", 100)]
+    @staticmethod
+    def light_angles(cfg, nid): return {}
 
 
 A.SL = FakeSL
@@ -232,7 +234,7 @@ files = {"telegram": A.Path("/no"), "kasa": A.Path("/no"), "asiair": A.Path("/no
 def snap(**kw):
     s = {"reachable": True, "capturing": True, "plan_started": True,
          "plan_name": "Sideris", "cam_open": True, "focuser_connected": True,
-         "wheel_connected": True, "mount_connected": True, "guide_connected": True,
+         "wheel_connected": True, "mount_connected": True, "guide_connected": True, "caa_connected": True,
          "has_plan": True, "flat_open": True}
     s.update(kw)
     return s

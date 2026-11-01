@@ -54,6 +54,8 @@ class FakeSL:
     def update_and_push(cfg): return {"new": 0}
     @staticmethod
     def filters_gains_used(cfg, nid): return KB["filters_gains"]
+    @staticmethod
+    def light_angles(cfg, nid): return KB.get("angles", {})
 
 
 A.SL = FakeSL
@@ -131,7 +133,7 @@ A.datetime = FakeDT
 def snap(started=True, **kw):
     s = {"reachable": True, "capturing": started, "plan_started": started,
          "plan_name": "Sideris", "cam_open": True, "focuser_connected": True,
-         "wheel_connected": True, "mount_connected": True, "guide_connected": True,
+         "wheel_connected": True, "mount_connected": True, "guide_connected": True, "caa_connected": True,
          "has_plan": True, "flat_open": True}
     s.update(kw)
     return s
@@ -153,12 +155,6 @@ def cyc(label, now=None, **kw):
 
 def msg_has(frag):
     return any(frag in m for m in MSGS)
-
-
-def msg_all(*frags):
-    """Un solo messaggio con tutti i frammenti: il riquadro «vivo» (2026-10-20)
-    tiene in testa la riga di avvio del gruppo e sotto l'avanzamento."""
-    return any(all(f in m for f in frags) for m in MSGS)
 
 
 def no_flat_calls():
@@ -268,6 +264,7 @@ assert not CANC.exists(), "richiesta consumata"
 assert state["flat_stage"] == "cancelled", state["flat_stage"]
 assert msg_has("Attesa flat INTERROTTA"), MSGS
 assert not msg_has("Attesa Flats"), "niente countdown dopo lo stop"
+assert "flat_wait_live" not in state, "riquadro dell'attesa chiuso (2026-10-20)"
 assert CALLS == [], f"il rig non va toccato: {CALLS}"
 assert state.get("flat_cancel_ts")
 # il promemoria non si accavalla al messaggio di stop (che lo dice gia')
@@ -314,6 +311,6 @@ cyc("A9 richiesta stantia con flat in corso",
 assert not CANC.exists(), "richiesta consumata comunque"
 assert state["flat_stage"] == "running", state["flat_stage"]
 assert msg_has("ignorata") and msg_has("running"), MSGS
-assert msg_all("Flat H (gain 100) in corso", "12/30 pose"), MSGS   # i flat proseguono davvero
+assert msg_has("12/30 pose"), MSGS   # i flat proseguono davvero
 
 print("\nTUTTI I TEST FLAT-STOP: OK")

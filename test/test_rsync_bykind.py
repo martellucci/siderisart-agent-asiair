@@ -235,8 +235,8 @@ T0 = datetime(2026, 10, 13, 13, 9, tzinfo=A.TZ_IT)
 NOW = datetime(2026, 10, 13, 14, 1, tzinfo=A.TZ_IT)
 R = {"copied": 86, "bytes": 4_100_000_000,
      "total_files": 180, "total_bytes": 8_800_000_000}
-txt = A.sync_live_text("Sync NAS flat/dark", "in corso", R, 52 * 60, T0, NOW, 120)
-assert txt == ("💾 Sync NAS flat/dark — in corso\n"
+txt = A.sync_live_text("Sync flat/dark", "in corso", R, 52 * 60, T0, NOW, 120)
+assert txt == ("💾 Sync flat/dark — in corso\n"
                "▓▓▓▓▓░░░░░ 47%\n"
                "86/180 file · 4,1/8,8 GB\n"
                "dalle 13:09 (52') · 1,3 MB/s · fine stimata ~15:00\n"
@@ -262,10 +262,10 @@ txt = A.sync_live_text("X", "completato ✅", dict(R, copied=180,
                        106 * 60, T0, NOW, 100)
 assert "▓▓▓▓▓▓▓▓▓▓ 100%" in txt and "1 h 46'" in txt and "stimata" not in txt, txt
 # fine e tempo esaurito coi totali
-assert A.sync_done_text("Sync NAS flat/dark", {
+assert A.sync_done_text("Sync flat/dark", {
     "copied": 180, "bytes": 8_800_000_000, "elapsed_s": 106 * 60,
     "by_kind": {"light": 0, "flat": 90, "dark": 90}}) == (
-    "✅ Sync NAS flat/dark completato: 180 file · 8,8 GB in 1 h 46' "
+    "✅ Sync flat/dark completato: 180 file · 8,8 GB in 1 h 46' "
     "(1,4 MB/s) — light 0 · flat 90 · dark 90.")
 assert "(150/180 file · 7,3/8,8 GB copiati" in A.sync_cap_text(
     "X", {"long_sync_minutes": 100}, {"copied": 150, "bytes": 7_300_000_000,

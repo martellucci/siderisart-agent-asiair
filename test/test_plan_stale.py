@@ -94,7 +94,7 @@ class FakeAsiair:
 
 CONNESSI = {"reachable": True, "cam_open": True, "focuser_connected": True,
             "wheel_connected": True, "mount_connected": True,
-            "guide_connected": True, "has_plan": True, "plan_name": "Sideris",
+            "guide_connected": True, "caa_connected": True, "has_plan": True, "plan_name": "Sideris",
             "flat_open": False}
 
 

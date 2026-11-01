@@ -48,7 +48,7 @@ bot.api = lambda method, **p: (EDITS.append((p.get("message_id"), p.get("text"))
                                if method == "editMessageText" else None,
                                {"ok": True})[1]
 bot.spawn = lambda name, fn, th: MSGS.append((f"[spawn {name}]", None))
-COSA = "Rsync ASIAIR→NAS (tutte le date)"
+COSA = "Rsync ASIAIR (tutte le date)"
 
 
 def run(label):
@@ -71,13 +71,13 @@ SYNC_Q[:] = [{"ok": True, "copied": 180, "bytes": 8_800_000_000,
 run("R1 completo")
 assert len(SYNC_KW) == 1 and SYNC_KW[0]["cap_minutes"] == 100, SYNC_KW
 assert SYNC_KW[0]["full"] is True and callable(SYNC_KW[0]["progress"]), SYNC_KW
-assert MSGS[0][0] == ("💾 Rsync ASIAIR→NAS (tutte le date) — in corso\n"
+assert MSGS[0][0] == ("💾 Rsync ASIAIR (tutte le date) — in corso\n"
                       "conto i file da copiare…\n"
                       "al massimo 100 minuti · aggiornamento qui ogni 9'"), MSGS[0]
 assert len(MSGS) == 2, MSGS                    # avvio + fine, nient'altro
 assert EDITS[-1][0] == 1 and EDITS[-1][1].startswith(
-    "💾 Rsync ASIAIR→NAS (tutte le date) — completato ✅\n▓▓▓▓▓▓▓▓▓▓ 100%"), EDITS
-assert MSGS[-1][0] == ("✅ Rsync ASIAIR→NAS (tutte le date) completato: 180 file · "
+    "💾 Rsync ASIAIR (tutte le date) — completato ✅\n▓▓▓▓▓▓▓▓▓▓ 100%"), EDITS
+assert MSGS[-1][0] == ("✅ Rsync ASIAIR (tutte le date) completato: 180 file · "
                        "8,8 GB in 1 h 46' (1,4 MB/s) — light 0 · flat 90 · "
                        "dark 90."), MSGS[-1]
 # avanzamento: MODIFICA del messaggio di avvio, nessun messaggio nuovo
@@ -104,8 +104,8 @@ assert "NON completato in 100 minuti (150/180 file · 7,3/8,8 GB" in cap_txt
 assert EDITS[-1][1].startswith(f"💾 {COSA} — NON completato\n▓▓▓▓▓▓▓▓░░ 83%"), EDITS
 assert "non riparto da solo, rilancia da /sfro → Rsync" in cap_txt
 # stesso testo del flusso flat, cambia solo il soggetto
-assert (A.sync_cap_text("Sync NAS flat/dark", sc, SYNC_Q_R2)
-        .replace("Sync NAS flat/dark", COSA) == cap_txt)
+assert (A.sync_cap_text("Sync flat/dark", sc, SYNC_Q_R2)
+        .replace("Sync flat/dark", COSA) == cap_txt)
 
 # R3: errore vero
 SYNC_Q[:] = [{"ok": False, "copied": 0, "error": "NAS dest non montato"}]

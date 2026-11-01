@@ -209,11 +209,24 @@ class Publisher:
         if self.user:
             self.client.username_pw_set(self.user, self.passwd)
         self.client.will_set(self._topic("status"), "offline", qos=1, retain=True)
+        # "online" + discovery a OGNI connessione, non solo alla prima: se il
+        # broker cade (riavvio HA/Mosquitto) pubblica il testamento "offline",
+        # paho si riconnette da solo e senza questo tutte le entita' restavano
+        # "non disponibili" a dati vivi (2026-11-01, autorun della mattina).
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
         self.client.connect(self.host, self.port, keepalive=60)
         self.client.loop_start()
+
+    def _on_connect(self, client, userdata, flags, rc, *props):
+        log.info("MQTT connesso al broker (%s)", rc)
         self.publish("status", "online", retain=True, raw=True)
         if self.discovery:
             self.publish_discovery()
+
+    def _on_disconnect(self, client, userdata, *args):
+        log.info("MQTT disconnesso dal broker (%s): riconnessione automatica",
+                 args[-2] if len(args) >= 2 else args)
 
     def publish(self, suffix, payload, retain=False, raw=False):
         topic = self._topic(suffix)
@@ -713,6 +726,9 @@ class Publisher:
                 now = time.monotonic()
                 self.publish("guide", self._guide_payload())
                 if now >= next_slow:
+                    # rete di sicurezza: un "offline" tardivo (testamento della
+                    # connessione precedente) si corregge entro un giro lento
+                    self.publish("status", "online", retain=True, raw=True)
                     for suffix, payload in self.slow_payloads().items():
                         self.publish(suffix, payload, retain=True)
                         if suffix == "session":

@@ -72,9 +72,9 @@ asiair:
   # del router SFRO (From 172.*) attraverso il tunnel, la sonda e' solo fallback.
   vpn_probe_host: "198.51.100.1"   # <<< IP del router remoto (sonda VPN)
   # I device che DEVONO risultare connessi (li apre connect_all all'avvio T-10).
-  # Con il rotatore ZWO CAA aggiungi "caa" (2026-10-25): connect_all lo apre
-  # e senza CAA aperto il piano NON parte.
-  required_devices: ["camera", "focuser", "wheel", "mount", "guide"]
+  # "caa" (rotatore) dal 2026-10-25: la notte 24-25/10 era rimasto chiuso
+  # perche' connect_all non lo apriva. Senza CAA aperto il piano NON parte.
+  required_devices: ["camera", "focuser", "wheel", "mount", "guide", "caa"]
   # WATCHDOG STALLO (2026-08-17): piano "avviato" ma residuo (get_plan)
   # invariato da N minuti -> allarme Telegram ripetuto (solo avviso, l'agente
   # non tocca la ripresa). La notte del 17/8 il mount ha rifiutato 3162 goto
@@ -208,14 +208,14 @@ flat_flow:
   # a 67% attesi ~R 7s B 5.5s G 2.5s, tutti comodi nella finestra 1-15s)
   # Scelta utente 2026-07-26.
   brightness_by_filter_gain0: {R: 67, G: 67, B: 67}
-  # ROTATORE ZWO CAA (2026-10-24): i flat si fanno all'angolo di ripresa di
-  # OGNI soggetto (sogg1 L a 30°, sogg2 L+H a 40° -> flat L30, L40, H40).
-  # Angoli dai nomi dei light (angolo in cielo; i due lati del meridian flip
-  # sono la stessa posizione), angoli entro la tolleranza = uno solo.
+  # ROTATORE ZWO CAA (richiesta utente 2026-10-24): il piano ruota da solo a
+  # inizio piano e al cambio soggetto; i flat vanno fatti all'angolo di
+  # ripresa di OGNI soggetto (sogg1 L a 30°, sogg2 L+H a 40° -> flat L30, L40,
+  # H40). Angoli dai nomi dei light (angolo in cielo; i due lati del meridian
+  # flip sono la stessa posizione), angoli entro la tolleranza = uno solo.
   # I dark NON ruotano. A flat finiti il rotatore resta sull'ultimo angolo.
-  # Senza rotatore lascialo spento: i flat si fanno senza rotazione.
   rotator:
-    enabled: false
+    enabled: true
     tolerance_deg: 2
   idle_brightness: 5            # "chiuso e spento" (luce trascurabile)
   # Fascia anticondensa = uscita 'dew_heater' (output 4) dell'ASIAIR: al
@@ -243,7 +243,7 @@ flat_flow:
   # (il sistema finisce di scrivere sulla SD) e stacca comunque la KASA.
   shutdown_grace_seconds: 90
 
-# Storico sessioni: FITS (NAS) -> SQLite -> Google Sheet "Diario Astrofotografia"
+# Storico sessioni: FITS (SSD e NAS) -> SQLite -> Google Sheet "Diario Astrofotografia"
 # (condiviso tra postazioni dal 2026-07-05: tab Sessioni con colonna Location;
 # il push riscrive SOLO le righe con Location=location_label, le altre
 # postazioni si preservano).
@@ -256,7 +256,10 @@ flat_flow:
 session_log:
   enabled: true
   db_file: /var/lib/sfro-agent/sessions.db
-  scan_dir: /mnt/astronomia/asiair_sfro/ASIAIR/Plan/Light
+  # light letti da ENTRAMBE le radici (2026-10-31: SSD + NAS di ripiego)
+  scan_dir:
+    - /mnt/ssd_astronomia/asiair_sfro/ASIAIR/Plan/Light
+    - /mnt/astronomia/asiair_sfro/ASIAIR/Plan/Light
   guide_sink_dir: /var/lib/sfro-agent/guide   # scritto da sfro_mqtt (GuideStep JSONL)
   focus_sink_dir: /var/lib/sfro-agent/focus   # scritto da sfro_mqtt (AutoFocus JSONL):
                                               # alimenta "HFR migliore"/"N autofocus".
@@ -339,7 +342,7 @@ flat_cancel_request_file: /var/lib/sfro-agent/flat_cancel.json
 # Cooldown per NON ripetere lo stesso avviso d'errore ad ogni ciclo (min).
 alert_cooldown_minutes: 30
 
-# Sync immagini ASIAIR -> NAS. Dal 2026-07-26 i frame vengono SMISTATI PER DATA
+# Sync immagini ASIAIR -> SSD (NAS di ripiego dal 2026-10-31, vedi ssd_dest). Dal 2026-07-26 i frame vengono SMISTATI PER DATA
 # in destinazione (l'ASIAIR li ammucchia tutti insieme e non e' configurabile):
 #   Autorun/Flat/<aaaammgg>/ · Autorun/Dark/<aaaammgg>/
 #   Plan/Light/<Soggetto>/<aaaammgg>/
@@ -353,6 +356,19 @@ sync_module:
   mount_point: /mnt/asiair_sfro
   credentials_file: /opt/sfro-agent/credentials_asiair
   nas_dest: /mnt/astronomia           # mount CIFS persistente (fstab)
+  # DESTINAZIONE PRINCIPALE (richiesta utente 2026-10-31): SSD USB "astronomia"
+  # montato sull'host Proxmox e passato al container (mp0). Lo spazio RAID del
+  # NAS resta per cio' che va conservato; il NAS (nas_dest) e' il RIPIEGO,
+  # nella stessa destinazione di sempre, se l'SSD non e' montato, e' in sola
+  # lettura, ha errori ext4, ha meno di ssd_min_free_gb liberi o non si lascia
+  # scrivere. I file finiti sul NAS in ripiego tornano sull'SSD da soli
+  # (registro fallback_ledger, copia verificata MD5, poi cancellati dal NAS).
+  # Stessa struttura sotto le due radici. Vuoto = solo NAS, come prima.
+  ssd_dest: /mnt/ssd_astronomia
+  ssd_min_free_gb: 20     # sotto: ripiego sul NAS (la notte piu' grossa vista: 12,6 GB)
+  ssd_warn_free_gb: 40    # sotto: avviso Telegram (una volta) per fare pulizia
+  dest_state_file: /var/lib/sfro-agent/sync_dest.json
+  fallback_ledger: /var/lib/sfro-agent/nas_ripiego.json
   rsync_exclude: ["*.jpg"]
   rsync_extra: []
   per_run_cap_minutes: 30             # passate NOTTURNE/teardown (invariato)
@@ -404,6 +420,8 @@ sync_module:
 # Gira dopo ogni sync riuscito, solo sulle ultime nights_back date.
 sessioni_giornaliere:
   enabled: true
+  # conta solo il NOME della cartella: la vista sta sotto la stessa radice del
+  # mirror (SSD, o NAS in ripiego) — 2026-10-31
   dest: /mnt/astronomia/sessioni_giornaliere
   mode: hardlink                # hardlink | copy (copy = file doppi sul NAS)
   nights_back: 2

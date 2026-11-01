@@ -301,9 +301,14 @@ def ingest(cfg: dict) -> dict:
     try:
         known = {r[0] for r in db.execute("SELECT file FROM frames")}
         cutoff = time.time() - float(c.get("backfill_days", 30)) * 86400
-        root = Path(c["scan_dir"])
+        # scan_dir: una cartella o una LISTA (2026-10-31: SSD principale e NAS
+        # di ripiego). Un frame in entrambe conta una volta: la PK e' il nome.
+        dirs = c["scan_dir"]
+        roots = [Path(d) for d in (dirs if isinstance(dirs, list) else [dirs])]
         new, nights = 0, set()
-        if root.is_dir():
+        for root in roots:
+            if not root.is_dir():
+                continue
             for p in sorted(root.rglob("*.fit*")):
                 name = p.name
                 if name in known or name.startswith("."):
@@ -342,6 +347,7 @@ def ingest(cfg: dict) -> dict:
                      round(st.st_size / 1048576, 1), str(p),
                      datetime.now(timezone.utc).isoformat(timespec="seconds")))
                 new += 1
+                known.add(name)       # stesso nome nell'altra radice
                 nights.add(nid)
         for nid in nights:
             _aggregate_night(db, nid, tz, c.get("focus_sink_dir", ""))

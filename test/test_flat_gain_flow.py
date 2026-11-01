@@ -46,6 +46,8 @@ class FakeSL:
     def update_and_push(cfg): return {"new": 0}
     @staticmethod
     def filters_gains_used(cfg, nid): return KB["filters_gains"]
+    @staticmethod
+    def light_angles(cfg, nid): return KB.get("angles", {})
 
 
 A.SL = FakeSL
@@ -140,7 +142,7 @@ A.datetime = FakeDT
 def snap(started=False, **kw):
     s = {"reachable": True, "capturing": False, "plan_started": started,
          "plan_name": "Sideris", "cam_open": True, "focuser_connected": True,
-         "wheel_connected": True, "mount_connected": True, "guide_connected": True,
+         "wheel_connected": True, "mount_connected": True, "guide_connected": True, "caa_connected": True,
          "has_plan": True, "flat_open": True}
     s.update(kw)
     return s
@@ -163,12 +165,6 @@ def msg_has(frag):
     return any(frag in m for m in MSGS)
 
 
-def msg_all(*frags):
-    """Un solo messaggio con tutti i frammenti: il riquadro «vivo» (2026-10-20)
-    tiene in testa la riga di avvio del gruppo e sotto l'avanzamento."""
-    return any(all(f in m for f in frags) for m in MSGS)
-
-
 # N1: ripresa, poi alba -> teardown + drying
 cyc("N1a ripresa", in_night=True, snap=snap(started=True))
 assert state.get("imaging_active")
@@ -183,6 +179,10 @@ cyc("N1b alba -> teardown", now=datetime(2026, 7, 24, 12, 40, tzinfo=tz),
 assert state.get("flat_stage") == "drying"
 assert state.get("dew_verdict") == "SECCA", state.get("dew_motivo")
 assert state.get("dry_wait_effective") == 5.0, state.get("dry_wait_effective")
+# countdown in un riquadro «vivo» (2026-10-20)
+assert msg_has("⏳ Attesa Flats — asciugatura 5 min\n"), MSGS
+assert msg_has("\n-5 minuti\nAggiornamento: "), MSGS
+assert "flat_wait_live" in state, state
 assert msg_has("asciugatura pannello 5 min"), MSGS
 assert msg_has("Condensa: notte SECCA"), MSGS
 
@@ -192,35 +192,61 @@ cyc("N2 gruppo (100,75)", now=datetime(2026, 7, 24, 12, 46, tzinfo=tz))
 assert CALLS == ["gain(100)", "slots(flat,[4, 5],exp=None)", "brightness(75)",
                  "start_flats"], CALLS
 assert msg_has("per H+S (gain 100)"), MSGS
+assert msg_has("⏳ Attesa Flats — asciugatura 5 min\n▓▓▓▓▓▓▓▓▓▓ 100%\n"
+               "asciugatura finita ✅"), MSGS
+assert "flat_wait_live" not in state, state
 assert state.get("flat_groups") == [[100, 75, [4, 5], "H+S"],
                                     [100, 50, [0], "L"],
                                     [0, 67, [2], "G"]], state.get("flat_groups")
 assert state.get("flat_stage") == "running"
 
-# N2b: autorun in corso -> avanzamento (mai silente, 2026-07-24), dal
-# 2026-10-20 riscritto nel riquadro «vivo» del gruppo
+# riquadro «vivo» (2026-10-20): la riga di avvio apre il riquadro del gruppo
+assert msg_has("💡 Pannello al 75% per H+S (gain 100): autorun flat avviato "
+               "(slot ok).\n░░░░░░░░░░ 0%\nin avvio…\nAggiornamento: "), MSGS
+assert state["flat_live"]["head"].startswith("💡 Pannello al 75% per H+S")
+
+# N2b: autorun in corso -> avanzamento (mai silente, 2026-07-24) MODIFICANDO il
+# riquadro al suo posto, nessun messaggio nuovo (2026-10-20)
+EDITS = []
+_edit0 = A.Telegram.edit
+A.Telegram.edit = lambda self, mid, t: (EDITS.append((mid, t)), True)[1]
+state["flat_live"]["mid"] = 77          # Telegram finto: send non da' id
 cyc("N2b avanzamento", flats_status=(True, True, 250, "12/30", ""))
-assert msg_all("per H+S (gain 100)", "12/30 pose · ~5 min residui"), MSGS
+assert not MSGS, MSGS
+assert len(EDITS) == 1 and EDITS[0][0] == 77, EDITS
+assert EDITS[0][1].startswith(
+    "💡 Pannello al 75% per H+S (gain 100): autorun flat avviato (slot ok).\n"
+    "▓▓▓▓░░░░░░ 40%\n12/30 pose · ~5 min residui\nAggiornamento: "), EDITS
 assert not CALLS, CALLS
 
-# N3: gruppo finito -> tempi auto letti, parte L @ gain 100 al 50%
+# N3: gruppo finito -> riquadro chiuso a 100% coi tempi auto letti (dal
+# 2026-10-20 niente messaggio ✅ separato), parte L @ gain 100 al 50% con un
+# riquadro nuovo
+EDITS.clear()
 cyc("N3 -> gruppo (100,50)", flats_status=(True, False, 0, None, ""))
-assert msg_all("per H+S (gain 100)", "completati in ~"), MSGS
-assert msg_has("Tempi auto: S 2.5s · H 3.1s"), MSGS
+assert len(EDITS) == 1 and EDITS[0][0] == 77, EDITS
+assert "▓▓▓▓▓▓▓▓▓▓ 100%\ncompletati in ~" in EDITS[0][1], EDITS
+assert "\nTempi auto: S 2.5s · H 3.1s\nAggiornamento: " in EDITS[0][1], EDITS
+A.Telegram.edit = _edit0
+assert not msg_has("✅ Flat"), MSGS             # la fine sta nel riquadro
+assert not msg_has("in corso: posa"), MSGS     # niente piu' clessidre
 assert state["flat_times"] == {"4:100": 2.5, "5:100": 3.1}, state["flat_times"]
 assert "gain(100)" in CALLS and "brightness(50)" in CALLS, CALLS
 assert msg_has("per L (gain 100)"), MSGS
 
 # N4: -> gruppo G @ gain 0 al 67% (RGB a gain 0: tetto ~15s, 2026-07-26)
 cyc("N4 -> gruppo (0,67)", flats_status=(True, False, 0, None, ""))
-assert msg_all("per L (gain 100)", "completati in ~"), MSGS
+# Telegram finto: la modifica non riesce e il riquadro ripiega su un messaggio
+assert msg_has("per L (gain 100): autorun flat avviato (slot ok).\n"
+               "▓▓▓▓▓▓▓▓▓▓ 100%\ncompletati in ~0 min ✅\nTempi auto: L 1.6s"), MSGS
 assert "gain(0)" in CALLS and "brightness(67)" in CALLS, CALLS
 assert msg_has("per G (gain 0)"), MSGS
 assert state["flat_times"]["0:100"] == 1.6
 
 # N5: ultimo gruppo flat finito -> pannello 5, DARK gain 100 (H+L+S) con exp dei flat
 cyc("N5 -> dark gain 100", flats_status=(True, False, 0, None, ""))
-assert msg_all("per G (gain 0)", "completati in ~"), MSGS
+assert msg_has("per G (gain 0): autorun flat avviato (slot ok).\n"
+               "▓▓▓▓▓▓▓▓▓▓ 100%\ncompletati in ~"), MSGS
 assert "brightness(5)" in CALLS, CALLS
 assert "gain(100)" in CALLS, CALLS
 assert "slots(dark,[0, 4, 5],exp={0: 1.6, 4: 2.5, 5: 3.1})" in CALLS, CALLS
@@ -231,7 +257,9 @@ assert state["flat_times"]["2:0"] == 2.2
 
 # N6: dark 100 finiti -> dark gain 0 (G) con exp del suo flat
 cyc("N6 -> dark gain 0", flats_status=(True, False, 0, None, ""))
-assert msg_all("Dark flat H+L+S (gain 100)", "completati in ~"), MSGS
+assert msg_has("Dark flat H+L+S (gain 100) avviati"), MSGS
+assert msg_has("▓▓▓▓▓▓▓▓▓▓ 100%\ncompletati in ~"), MSGS
+assert not msg_has("✅ Dark flat"), MSGS
 assert "gain(0)" in CALLS, CALLS
 assert "slots(dark,[2],exp={2: 2.2})" in CALLS, CALLS
 assert msg_has("Dark flat G (gain 0) avviati"), MSGS
@@ -240,7 +268,8 @@ assert msg_has("Dark flat G (gain 0) avviati"), MSGS
 # shutdown, KASA off. L'ordine e' quello dal 2026-09-08: a frame finiti niente
 # resta acceso durante l'rsync, che dura minuti.
 cyc("N7 chiusura", flats_status=(True, False, 0, None, ""))
-assert msg_all("Dark flat G (gain 0)", "completati in ~"), MSGS
+assert msg_has("Dark flat G (gain 0) avviati"), MSGS
+assert msg_has("▓▓▓▓▓▓▓▓▓▓ 100%\ncompletati in ~"), MSGS
 assert "sync" in CALLS and "set_output(dew_heater,5)" in CALLS, CALLS
 assert "cooler_off" in CALLS, CALLS
 i_cool, i_heat, i_sync, i_shut = (CALLS.index("cooler_off"),
@@ -385,17 +414,17 @@ assert state.get("flat_stage") == "done" and "flat_sync_started_ts" not in state
 # messaggio «vivo» (2026-10-13): avvio, stato finale, poi la fine come
 # messaggio nuovo. Qui Telegram e' disabilitato: le modifiche ripiegano su
 # messaggi nuovi, quindi lo stato finale compare in MSGS.
-assert msg_has("💾 Sync NAS flat/dark — in corso\nconto i file da copiare…\n"
+assert msg_has("💾 Sync flat/dark — in corso\nconto i file da copiare…\n"
                "al massimo 100 minuti"), MSGS
-assert msg_has("💾 Sync NAS flat/dark — completato ✅"), MSGS
-assert msg_has("✅ Sync NAS flat/dark completato: 5 file"), MSGS
+assert msg_has("💾 Sync flat/dark — completato ✅"), MSGS
+assert msg_has("✅ Sync flat/dark completato: 5 file"), MSGS
 # l'avanzamento passato a sync_pass e' quello del messaggio vivo
 live = SYNC_KW[0]["progress"].__self__
-assert isinstance(live, A.SyncLive) and live.cosa == "Sync NAS flat/dark", live
+assert isinstance(live, A.SyncLive) and live.cosa == "Sync flat/dark", live
 live.closed = False                              # come durante la copia
 SYNC_KW[0]["progress"]({"copied": 12, "bytes": 626_000_000, "total_files": 30,
                         "total_bytes": 1_500_000_000}, 540)
-assert MSGS[-1].startswith("💾 Sync NAS flat/dark — in corso\n▓▓▓▓░░░░░░ 42%\n"
+assert MSGS[-1].startswith("💾 Sync flat/dark — in corso\n▓▓▓▓░░░░░░ 42%\n"
                            "12/30 file · 0,6/1,5 GB\ndalle "), MSGS[-1]
 
 # N12b: tempo esaurito -> sync_incomplete, rig ACCESO, nessuna seconda passata
@@ -405,7 +434,7 @@ cyc("N12b sync oltre il tetto", flats_status=(True, False, 0, None, ""))
 assert state.get("flat_stage") == "sync_incomplete", state.get("flat_stage")
 assert "flat_sync_started_ts" not in state, state
 assert msg_has("NON completato in 100 minuti") and msg_has("40 file"), MSGS
-assert msg_has("💾 Sync NAS flat/dark — NON completato"), MSGS
+assert msg_has("💾 Sync flat/dark — NON completato"), MSGS
 assert msg_has("non riparto da solo") and not msg_has("INTERROTTO"), MSGS
 assert "shutdown" not in CALLS and "kasa_off_all" not in CALLS, CALLS
 cyc("N12c ciclo dopo: niente", now=datetime(2026, 7, 30, 14, 15, tzinfo=tz))

@@ -37,7 +37,7 @@ A.http_get_json = lambda url, http, session=None: {}
 A.parse_alpaca = lambda data: ROOF
 
 CONNECTED = {"cam_open": True, "focuser_connected": True, "wheel_connected": True,
-             "mount_connected": True, "guide_connected": True, "reachable": True}
+             "mount_connected": True, "guide_connected": True, "caa_connected": True, "reachable": True}
 
 def snap(plan=False, capt=False, name="M31"):
     d = dict(CONNECTED)

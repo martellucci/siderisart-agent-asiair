@@ -69,7 +69,7 @@ A.AsiairControl.snapshot = lambda self: {
     "reachable": True, "capturing": True, "plan_started": True,
     "plan_name": "Sideris", "has_plan": True, "cam_open": True,
     "focuser_connected": True, "wheel_connected": True,
-    "mount_connected": True, "guide_connected": True, "capture_state": "exposing"}
+    "mount_connected": True, "guide_connected": True, "caa_connected": True, "capture_state": "exposing"}
 A.AsiairControl.teardown = lambda self, keep_cooler=False: {
     "stop": (True, ""), "home": (True, ""), "flat": (True, "")}
 A.AsiairControl.start = lambda self, s=None: (True, "ok")

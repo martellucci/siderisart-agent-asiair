@@ -52,6 +52,8 @@ class FakeSL:
     def update_and_push(cfg): return {"new": 0}
     @staticmethod
     def filters_gains_used(cfg, nid): return KB["filters_gains"]
+    @staticmethod
+    def light_angles(cfg, nid): return KB.get("angles", {})
 
 
 A.SL = FakeSL
@@ -135,7 +137,7 @@ A.datetime = FakeDT
 def snap(started=False, **kw):
     s = {"reachable": True, "capturing": started, "plan_started": started,
          "plan_name": "Sideris", "cam_open": True, "focuser_connected": True,
-         "wheel_connected": True, "mount_connected": True, "guide_connected": True,
+         "wheel_connected": True, "mount_connected": True, "guide_connected": True, "caa_connected": True,
          "has_plan": True, "flat_open": True}
     s.update(kw)
     return s

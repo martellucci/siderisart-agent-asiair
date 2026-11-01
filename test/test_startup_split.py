@@ -46,7 +46,7 @@ A._kasa_power_on = lambda kc, dev, managed, dry: (
 A._kasa_power_off_all = lambda kc, dev, dry: (2, [], None)
 
 CONNECTED = {"cam_open": True, "focuser_connected": True, "wheel_connected": True,
-             "mount_connected": True, "guide_connected": True, "reachable": True}
+             "mount_connected": True, "guide_connected": True, "caa_connected": True, "reachable": True}
 SNAP = dict(CONNECTED, plan_started=False, capturing=False,
             plan_name="Piano SFRO", has_plan=True)
 A.AsiairControl.snapshot = lambda self: dict(SNAP)
