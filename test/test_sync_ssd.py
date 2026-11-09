@@ -13,7 +13,9 @@ Il montaggio dei tre punti (share ASIAIR, NAS, SSD) e' simulato.
   F  spazio sotto la soglia d'avviso: avviso una volta, poi silenzio
   G  dry-run: nessun avviso, nessun registro, nessun rientro
   H  diario: scan_dir a lista, un frame in due radici conta una volta
+  I  disco morto ma ancora montato (EIO): ripiego sul NAS, poi rientro
 """
+import errno
 import json
 import os
 import shutil
@@ -228,6 +230,63 @@ r = SL.ingest(cfg_sl)
 assert r["new"] == 2, r
 assert SL.ingest(cfg_sl)["new"] == 0
 print("H  diario su due radici -> ogni frame una volta: OK")
+
+# I — disco morto ma ancora montato (USB sganciata, ext4 in shutdown: 2026-11-09)
+# Il montaggio risulta presente e in rw, ma le letture sull'SSD danno EIO.
+_vera_statvfs, _vera_stat = os.statvfs, Path.stat
+
+
+def _eio():
+    raise OSError(errno.EIO, "Input/output error")
+
+
+def _stat_morta(self, **kw):
+    if str(self).startswith(str(SSD)):
+        _eio()
+    return _vera_stat(self, **kw)
+
+
+def _statvfs_morta(p):
+    if str(p) == str(SSD):
+        _eio()
+    return _vera_statvfs(p)
+
+
+def _open_morta(f, *a, **k):
+    if str(f).startswith(str(SSD)):
+        _eio()
+    return open(f, *a, **k)
+
+
+# I1: anche lo spazio libero e' illeggibile
+put(f"ASIAIR/Plan/Light/{SOGG}/{light(5)}", b"L5" * 500)
+Path.stat, os.statvfs = _stat_morta, _statvfs_morta
+try:
+    r = run()
+finally:
+    Path.stat, os.statvfs = _vera_stat, _vera_statvfs
+assert r["dest"] == "nas" and "illeggibile" in r["dest_why"], r
+assert "ripiego" in r["dest_notice"], r["dest_notice"]
+assert lp(NAS, light(5)).is_file(), "file nuovo non salvato sul NAS"
+
+# I2: lo spazio si legge ancora, ma scrittura e cartelle danno EIO
+put(f"ASIAIR/Plan/Light/{SOGG}/{light(6)}", b"L6" * 500)
+Path.stat, A.open = _stat_morta, _open_morta
+try:
+    r = run()
+finally:
+    Path.stat = _vera_stat
+    del A.open
+assert r["dest"] == "nas" and "scrittura" in r["dest_why"], r
+assert lp(NAS, light(6)).is_file(), "file nuovo non salvato sul NAS"
+
+# Disco di nuovo sano: tutto torna sull'SSD, niente doppioni sul NAS
+r = run()
+assert r["dest"] == "ssd" and r["ok"], r
+for n in (5, 6):
+    assert lp(SSD, light(n)).is_file(), f"light {n} non tornato sull'SSD"
+    assert not lp(NAS, light(n)).exists(), f"light {n} rimasto sul NAS"
+print("I  disco morto ma montato -> ripiego sul NAS, poi rientro: OK")
 
 shutil.rmtree(TMP)
 print("TUTTO OK")

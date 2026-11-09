@@ -2306,6 +2306,15 @@ def _mount_entry(path: str) -> tuple:
     return found
 
 
+def _dir_leggibile(p: Path) -> bool:
+    """is_dir() che su un disco morto risponde False: Path.is_dir solleva
+    OSError su EIO, e il ripiego sul NAS si fermerebbe (2026-11-09)."""
+    try:
+        return p.is_dir()
+    except OSError:
+        return False
+
+
 def ssd_problem(sc: dict) -> tuple:
     """(motivo per NON usare l'SSD oppure None, GB liberi o None)."""
     ssd = sc.get("ssd_dest") or ""
@@ -2322,7 +2331,10 @@ def ssd_problem(sc: dict) -> tuple:
     if n > 0:
         return (f"il filesystem dell'SSD ha registrato {n} errori: serve un "
                 "controllo (fsck) dall'host", None)
-    st = os.statvfs(ssd)
+    try:
+        st = os.statvfs(ssd)
+    except OSError as e:         # USB sganciata ma ancora montato (2026-11-09)
+        return f"SSD illeggibile ({e.strerror or e})", None
     free_gb = st.f_bavail * st.f_frsize / 1e9
     need = float(sc.get("ssd_min_free_gb", 20))
     if free_gb < need:
@@ -2828,7 +2840,7 @@ def _sync_pass_locked(sc: dict, dry_run: bool, cfg: dict = None,
             for filters, src, dst, kind in passes:
                 cmp_dir = Path(sc["ssd_dest"]) / Path(dst).relative_to(root)
                 extra = ([f"--compare-dest={cmp_dir}"]
-                         if cmp_dir.is_dir() else [])
+                         if _dir_leggibile(cmp_dir) else [])
                 con.append((filters + extra, src, dst, kind))
             passes = con
 
