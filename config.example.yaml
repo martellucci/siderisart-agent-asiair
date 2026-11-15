@@ -274,7 +274,7 @@ session_log:
                                # Dettaglio_SFRO eliminata)
   tab_by_object: Per soggetto  # riepiloghi riscritti a ogni push (poche righe)
   tab_by_month: Per mese
-  detail_csv_dir: /mnt/astronomia/asiair_sfro/Diario/dettaglio   # SFRO_aaaammgg.csv
+  detail_csv_dir: /mnt/astronomia/diario_astronomico   # SFRO_aaaammgg.csv (dal 2026-11-12, prima asiair_sfro/Diario/dettaglio)
   location_label: SFRO
   idle_finalize_minutes: 10    # piano fermo da N min a tetto aperto -> chiusura log
 
@@ -364,6 +364,8 @@ sync_module:
   # scrivere. I file finiti sul NAS in ripiego tornano sull'SSD da soli
   # (registro fallback_ledger, copia verificata MD5, poi cancellati dal NAS).
   # Stessa struttura sotto le due radici. Vuoto = solo NAS, come prima.
+  # 2026-11-11/12: solo NAS per 1 giorno (SSD in I/O error); 12/11 box SABRENT
+  # nuovo, fsck ok, notti 11-12/11 copiate NAS->SSD e verificate MD5.
   ssd_dest: /mnt/ssd_astronomia
   ssd_min_free_gb: 20     # sotto: ripiego sul NAS (la notte piu' grossa vista: 12,6 GB)
   ssd_warn_free_gb: 40    # sotto: avviso Telegram (una volta) per fare pulizia
