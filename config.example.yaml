@@ -258,7 +258,8 @@ session_log:
   db_file: /var/lib/sfro-agent/sessions.db
   # light letti da ENTRAMBE le radici (2026-10-31: SSD + NAS di ripiego)
   scan_dir:
-    - /mnt/ssd_astronomia/asiair_sfro/ASIAIR/Plan/Light
+    # 2026-11-18 SSD tolto (solo NAS): rimettere la riga sotto quando torna
+    # - /mnt/ssd_astronomia/asiair_sfro/ASIAIR/Plan/Light
     - /mnt/astronomia/asiair_sfro/ASIAIR/Plan/Light
   guide_sink_dir: /var/lib/sfro-agent/guide   # scritto da sfro_mqtt (GuideStep JSONL)
   focus_sink_dir: /var/lib/sfro-agent/focus   # scritto da sfro_mqtt (AutoFocus JSONL):
@@ -366,7 +367,10 @@ sync_module:
   # Stessa struttura sotto le due radici. Vuoto = solo NAS, come prima.
   # 2026-11-11/12: solo NAS per 1 giorno (SSD in I/O error); 12/11 box SABRENT
   # nuovo, fsck ok, notti 11-12/11 copiate NAS->SSD e verificate MD5.
-  ssd_dest: /mnt/ssd_astronomia
+  # 2026-11-18: SOLO NAS su richiesta dell'utente. L'SSD si e' sganciato di
+  # nuovo il 15/11 17:24 (usb 2-6, anche col box nuovo: porta o SSD) e la notte
+  # 17-18/11 e' finita sul NAS in ripiego. Valore di prima: /mnt/ssd_astronomia
+  ssd_dest: ""
   ssd_min_free_gb: 20     # sotto: ripiego sul NAS (la notte piu' grossa vista: 12,6 GB)
   ssd_warn_free_gb: 40    # sotto: avviso Telegram (una volta) per fare pulizia
   dest_state_file: /var/lib/sfro-agent/sync_dest.json

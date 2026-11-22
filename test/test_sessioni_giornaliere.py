@@ -1,7 +1,7 @@
 """Test OFFLINE della vista per soggetto x notte (sfro_sessioni, 2026-09-17).
 
 Verifica su un finto albero NAS:
-  - layout <soggetto>/<data>/light|flat|dark/
+  - layout <soggetto>/<data>/light|flat|darkflat/
   - la cartella-data porta il giorno ITALIANO dell'istante di ripresa
     (2026-09-18), non quello dell'osservatorio: la sessione che a questo sito
     parte la sera del 17/9 sta in 20260918, flat del mattino dopo compresi
@@ -85,8 +85,8 @@ assert not (DEST / S1 / "20260917").exists(), "data USA invece di quella italian
 # ogni soggetto ha SOLO le calibrazioni del proprio filtro+gain
 assert ck(f"{S1}/{N}/flat") == ["Flat_1.2s_Bin1_2600MM_H_gain100_20260918-140000_1deg_0.1C_0001.fit"], ck(f"{S1}/{N}/flat")
 assert ck(f"{S2}/{N}/flat") == ["Flat_3.4s_Bin1_2600MM_L_gain0_20260918-140100_1deg_0.1C_0001.fit"], ck(f"{S2}/{N}/flat")
-assert ck(f"{S1}/{N}/dark")[0].startswith("Dark_1.2s"), ck(f"{S1}/{N}/dark")
-assert ck(f"{S2}/{N}/dark")[0].startswith("Dark_3.4s"), ck(f"{S2}/{N}/dark")
+assert ck(f"{S1}/{N}/darkflat")[0].startswith("Dark_1.2s"), ck(f"{S1}/{N}/darkflat")
+assert ck(f"{S2}/{N}/darkflat")[0].startswith("Dark_3.4s"), ck(f"{S2}/{N}/darkflat")
 # il filtro S non e' stato usato da nessuno: non deve comparire da nessuna parte
 assert not list(DEST.rglob("*_S_gain75_*")), list(DEST.rglob("*_S_gain75_*"))
 # la sessione precedente non e' stata toccata

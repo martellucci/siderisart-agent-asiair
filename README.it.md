@@ -133,7 +133,7 @@ Su altri impianti non è provato (vedi le note oneste più sotto).
   passata notturna salta in silenzio, il sync dopo i flat aspetta, il bottone
   risponde "già in corso". Se il processo muore, il kernel libera il lock.
 - **Vista per soggetto e per notte sul NAS**: accanto al mirror grezzo, un
-  secondo albero `soggetto/notte/light|flat|dark` con i flat e i dark dei filtri,
+  secondo albero `soggetto/notte/light|flat|darkflat` con i flat e i dark dei filtri,
   del gain e dell'angolo del rotatore di ciascun soggetto — fatto con **hardlink**, quindi niente occupa
   spazio due volte (CIFS non accetta symlink). La cartella della notte porta il
   giorno del **tuo** fuso orario (`folder_timezone`), non quello dell'osservatorio.

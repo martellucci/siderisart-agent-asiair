@@ -133,7 +133,7 @@ Other rigs are untested (see the honest notes below).
   the night pass skips silently, the post-flat sync waits, the button says
   "already running". The kernel releases the lock if the process dies.
 - **Per-target, per-night view on the NAS**: next to the raw mirror, a second
-  tree `target/night/light|flat|dark` with the flats and darks matching each
+  tree `target/night/light|flat|darkflat` with the flats and darks matching each
   target's filters, gain and rotator angle — built with **hardlinks**, so nothing takes space
   twice (CIFS doesn't allow symlinks). The night folder is named after the day
   in **your** time zone (`folder_timezone`), not the observatory's.

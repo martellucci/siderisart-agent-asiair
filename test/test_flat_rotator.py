@@ -324,8 +324,8 @@ ls = lambda rel: sorted(p.name.split("_gain")[0][-1] + p.name.split("deg_")[0].s
                         for p in (DEST / rel).iterdir())
 assert ls("S1/20261024/flat") == ["L30"], ls("S1/20261024/flat")
 assert ls("S2/20261024/flat") == ["H40", "L40"], ls("S2/20261024/flat")
-assert ls("S1/20261024/dark") == ["L40"], ls("S1/20261024/dark")   # dark: filtro+gain
-assert ls("S2/20261024/dark") == ["H40", "L40"], ls("S2/20261024/dark")
+assert ls("S1/20261024/darkflat") == ["L40"], ls("S1/20261024/darkflat")   # dark: filtro+gain
+assert ls("S2/20261024/darkflat") == ["H40", "L40"], ls("S2/20261024/darkflat")
 assert S.same_angle(12, 192, 2) and S.same_angle(359, 1, 2) and not S.same_angle(30, 40, 2)
 shutil.rmtree(TMP)
 print("OK sessioni giornaliere per angolo")

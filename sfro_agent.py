@@ -3974,7 +3974,8 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
 
             def sync_incomplete(text):
                 state["flat_stage"] = "sync_incomplete"
-                state["flat_error"] = f"{now.isoformat()} {text}"
+                state["flat_error"] = (f"{datetime.now(now.tzinfo).isoformat()}"
+                                       f" {text}")   # dopo un sync lungo
                 state.pop("flat_sync_started_ts", None)
                 log.warning("Flusso flat: %s", text)
                 notify(text + "\nNON spengo: rig lasciato acceso, a copia "
@@ -4041,7 +4042,11 @@ def run_cycle(cfg: dict, state: dict, files: dict, dry_run: bool) -> dict:
             # La risposta torna qui col file di reply.
             if state.get("flat_ask_shutdown"):
                 state["flat_stage"] = "ask_shutdown"
-                state["flat_ask_ts"] = now.isoformat()
+                # ora VERA della domanda, non 'now' (= inizio ciclo): il sync
+                # sopra puo' durare fino a 100' e col 'now' vecchio il timeout
+                # dei 60' scattava subito (2026-11-20: domanda e «nessuna
+                # risposta entro 60 min» nello stesso minuto, 14:06)
+                state["flat_ask_ts"] = datetime.now(now.tzinfo).isoformat()
                 state.pop("flat_ask_reminder_ts", None)
                 mf_rep.unlink(missing_ok=True)   # eventuale risposta vecchia
                 ask_shutdown()

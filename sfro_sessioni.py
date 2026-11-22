@@ -7,7 +7,8 @@ Layout prodotto (richiesta utente 2026-09-17):
     <dest>/<soggetto>/<aaaammgg notte>/light/   i light di quel soggetto
                                        /flat/   flat dei SUOI filtri+gain
                                                 (e del SUO angolo, 2026-10-24)
-                                       /dark/   dark dei SUOI filtri+gain
+                                       /darkflat/ dark dei SUOI filtri+gain
+                                                (cartella "dark" fino al 2026-11-22)
 
 I flat e i dark della notte sono UNICI ma servono a piu' soggetti: compaiono
 sotto ognuno dei soggetti che quel filtro+gain l'ha usato quella notte.
@@ -69,7 +70,7 @@ DEFAULTS = {
 
 LIGHT_REL = "Plan/Light"
 CALIB_RELS = (("Autorun/Flat", "flat"), ("Autorun/Dark", "dark"))
-SUBDIRS = {"light": "light", "flat": "flat", "dark": "dark"}
+SUBDIRS = {"light": "light", "flat": "flat", "dark": "darkflat"}  # dark -> darkflat: richiesta utente 2026-11-22
 
 # Nome ASIAIR: Light_<sogg>_300.0s_Bin1_2600MM_H_gain100_20260917-021500_...fit
 # Il gruppo centrale e' <camera> oppure <camera>_<filtro>: con una camera a
