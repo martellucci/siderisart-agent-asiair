@@ -717,6 +717,13 @@ class AsiairControl:
                                           fp.get("read_tries", 3)))
         self.out_read_wait = float(cfg.get("output_read_wait_seconds",
                                            fp.get("read_wait_seconds", 3)))
+        # FINE AUTORUN E CATTURA ANCORA ATTIVA (incidente 2026-11-25): tra una
+        # posa e l'altra is_working e' falso per ~1 s. Un "fermo" va RILETTO
+        # dopo idle_confirm s prima di crederci; un reset che trova la cattura
+        # ancora attiva (code 206) si ritenta ogni busy_retry s fino a busy_wait s.
+        self.idle_confirm = float(cfg.get("autorun_idle_confirm_seconds", 6))
+        self.busy_wait = float(cfg.get("capture_busy_wait_seconds", 120))
+        self.busy_retry = float(cfg.get("capture_busy_retry_seconds", 5))
         self.out_read_detail = ""       # motivo dell'ultima lettura fallita
         # pre-avvio piano (2026-07-19): fascia anticondensa (output 4) a
         # questo valore
@@ -1396,9 +1403,12 @@ class AsiairControl:
                 if pg.get("code") != 0:
                     return False, (f"set_page '{self.flat_page}' code {pg.get('code')}: "
                                    "nome pagina autorun da verificare")
-                r, _ = c.call("reset_sequence_progress", [], max_wait=self.timeout)
-                if r.get("code") != 0:
-                    return False, f"reset_sequence_progress code {r.get('code')}"
+                def _rs():
+                    r, _ = c.call("reset_sequence_progress", [], max_wait=self.timeout)
+                    return r.get("code"), r.get("error")
+                ok_r, det_r = self._reset_progress(_rs)
+                if not ok_r:
+                    return False, det_r
                 q, _ = c.call("get_target_sequences", [], max_wait=self.timeout)
                 # A2 (2026-08-12): distinguere "la sequenza e' vuota" da "non ho
                 # potuto leggerla". Prima erano lo stesso messaggio e mandavano a
@@ -1454,19 +1464,52 @@ class AsiairControl:
         working = capture.is_working; left_time_sec da get_target_sequences
         (0 a fine sequenza; >0 se interrotta a meta'); prog = 'fatte/totali'
         da frame_summary (None se non disponibile) — per i messaggi di
-        avanzamento (richiesta utente 2026-07-24: mai silente sui flat)."""
+        avanzamento (richiesta utente 2026-07-24: mai silente sui flat).
+        CONFERMA DEL FERMO (incidente 2026-11-25): il ciclo delle 12:54 ha
+        letto is_working falso nella pausa di ~1 s TRA due pose (flat 28 e 29
+        di 30, ~17 s residui sotto la soglia dei 60) e ha dato i flat per
+        finiti; il reset per i dark e' stato respinto con 206 "capture is
+        active" e il flusso si e' fermato. Ora un "fermo" si rilegge dopo
+        idle_confirm secondi: se la cattura e' ripresa, e' ancora in corso."""
+        def _read(c):
+            a, _ = c.call("get_app_state", [], max_wait=self.timeout)
+            cap = (a.get("result") or {}).get("capture") or {}
+            fs = cap.get("frame_summary") or {}
+            prog = (f"{fs.get('complete_num')}/{fs.get('total')}"
+                    if fs.get("total") else None)
+            q, _ = c.call("get_target_sequences", [], max_wait=self.timeout)
+            left = int((q.get("result") or {}).get("left_time_sec") or 0)
+            return bool(cap.get("is_working")), left, prog
         try:
             with self._client() as c:
-                a, _ = c.call("get_app_state", [], max_wait=self.timeout)
-                cap = (a.get("result") or {}).get("capture") or {}
-                fs = cap.get("frame_summary") or {}
-                prog = (f"{fs.get('complete_num')}/{fs.get('total')}"
-                        if fs.get("total") else None)
-                q, _ = c.call("get_target_sequences", [], max_wait=self.timeout)
-                left = int((q.get("result") or {}).get("left_time_sec") or 0)
-                return True, bool(cap.get("is_working")), left, prog, ""
+                working, left, prog = _read(c)
+                if not working and self.idle_confirm > 0:
+                    time.sleep(self.idle_confirm)
+                    working, left, prog = _read(c)
+                return True, working, left, prog, ""
         except Exception as e:
             return False, False, 0, None, str(e)
+
+    def _reset_progress(self, call) -> tuple:
+        """reset_sequence_progress con attesa se la cattura e' ancora attiva.
+        `call()` esegue il comando e ritorna (code, errore). Code 206 = "capture
+        is active" (l'ultima posa non e' ancora chiusa): si ritenta ogni
+        busy_retry s fino a busy_wait s; ogni altro codice esce subito.
+        Ritorna (ok, detail) col testo dell'ASIAIR, non solo il codice."""
+        t0 = time.monotonic()
+        while True:
+            code, err = call()
+            if code == 0:
+                return True, ""
+            if code != 206 or time.monotonic() - t0 >= self.busy_wait:
+                waited = int(time.monotonic() - t0)
+                return False, (f"reset_sequence_progress code {code}"
+                               + (f": {err}" if err else "")
+                               + (f" (dopo {waited}s di attesa)"
+                                  if code == 206 and waited else ""))
+            log.info("reset_sequence_progress: cattura ancora attiva (206), "
+                     "riprovo tra %gs", self.busy_retry)
+            time.sleep(self.busy_retry)
 
     def _call1(self, port, method, params=None, timeout=None):
         """Comando one-shot su connessione fresca (robusto ai broken-pipe).
@@ -1794,9 +1837,10 @@ class AsiairControl:
             if code != 0:
                 return False, 0, f"get_target_sequences code {code}"
             slots = (seq or {}).get("slots") or []
-            r, _ = self._call1(self.port, "reset_sequence_progress")
-            if r != 0:
-                return False, 0, f"reset_sequence_progress code {r}"
+            ok_r, det_r = self._reset_progress(
+                lambda: self._call1(self.port, "reset_sequence_progress"))
+            if not ok_r:
+                return False, 0, det_r
             for s in slots:
                 want = (s.get("type") == kind and s.get("filter") in filter_idxs
                         and (max_exp is None or float(s.get("exp") or 0) <= max_exp))

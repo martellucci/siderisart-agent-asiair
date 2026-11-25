@@ -174,6 +174,10 @@ risulta false (verificato live).
   enable E repeat; `left_time_sec` si aggiorna subito.
 - **Code 224** "cannot edit sequence unless reset the progress": slot con
   `lapsed>0` non editabili → dare `reset_sequence_progress []` PRIMA di editare.
+- **Code 206** "capture is active": comando (start_exposure, reset_sequence_progress)
+  mentre una posa e' ancora in corso. Tra due pose dell'autorun `is_working` e'
+  falso per ~1 s: un solo "fermo" NON vuol dire fine (incidente 2026-11-25,
+  rilettura dopo 6 s e ritentativo del 206 ogni 5 s fino a 120 s).
 - Campo `filter` = indice 0-based su `get_wheel_setting.names`
   (qui `["L","R","G","B","S","H","O"]` → S=4, H=5).
 - Durante l'autorun: `capture.frame_summary.complete_num/total` e

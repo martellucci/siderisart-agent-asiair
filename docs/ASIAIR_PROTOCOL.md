@@ -219,6 +219,11 @@ really does clear it: after the dawn reset `is_plan_started` reads false
 - **Code 224** "cannot edit sequence unless reset the progress": slots with
   `lapsed > 0` are not editable → send `reset_sequence_progress []` **before**
   editing.
+- **Code 206** "capture is active": a command (start_exposure,
+  reset_sequence_progress) sent while an exposure is still running. Between two
+  autorun exposures `is_working` is false for ~1 s, so a single "stopped"
+  reading does not mean the run is over: re-read after a few seconds and retry
+  a 206 for a while.
 - The `filter` field is a **0-based index** into `get_wheel_setting.names`
   (with `["L","R","G","B","S","H","O"]`, S = 4 and H = 5).
 - During an autorun, `capture.frame_summary.complete_num/total` and
